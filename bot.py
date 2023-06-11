@@ -53,10 +53,6 @@ class TechnicalAnalysisTool:
                         self.move_along_data(1)
                     elif event.key == pygame.K_LEFT:
                         self.move_along_data(-1)
-                    elif event.key == pygame.K_DOWN:
-                        self.move_between_rows(1)
-                    elif event.key == pygame.K_UP:
-                        self.move_between_rows(-1)
                     elif event.key == pygame.K_F1:
                         self.change_timeframe()
                     elif event.key == pygame.K_F2:
