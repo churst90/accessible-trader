@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 from speechmanager import SpeechManager
 
+
 class TechnicalAnalysisTool:
     def __init__(self):
         self.assets = []
@@ -59,9 +60,14 @@ class TechnicalAnalysisTool:
                     elif event.key == pygame.K_F1:
                         self.change_timeframe()
                     elif event.key == pygame.K_F2:
-                        self.change_interval()
+                        # If the shift key is also being pressed
+                        if pygame.key.get_mods() & pygame.KMOD_SHIFT:
+                            self.change_interval(-1)
+                        else:
+                            self.change_interval(1)
                     elif event.key == pygame.K_F3:
                         await self.select_asset_pair()
+                    elif event.key == pygame.K_F4:
                         self.retrieve_ohlc_data()
                         self.create_chart()
 
@@ -116,10 +122,11 @@ class TechnicalAnalysisTool:
                 data = ohlc_data["data"]["ohlc"]
                 columns = ["timestamp", "high", "open", "close", "low", "volume"]
                 self.ohlc_data = pd.DataFrame(data, columns=columns)
+                self.tts.speak(f"Loaded {self.timeframes[self.timeframe_multiplier]} chart for {self.selected_asset}")
             else:
-                print("No OHLC data returned from the server.")
+                self.tts.speak("No data available for that time interval.")
         else:
-            print(f"Error retrieving OHLC data: {response.status_code}")
+            self.tts.speak("No data available for that time interval.")
 
     def create_chart(self):
         if self.ohlc_data is not None:
@@ -169,48 +176,30 @@ class TechnicalAnalysisTool:
         if self.chart:
             self.current_series_index = (self.current_series_index + direction) % len(self.chart)
             self.tts.speak(self.get_series_name(self.current_series_index))
-            self.current_column = min(max(0, self.current_column), len(self.chart[self.current_series_index][0]) - 1)
-            self.current_row = min(max(0, self.current_row), len(self.chart[self.current_series_index]) - 1)
-            self.tts.speak(self.get_current_data())
 
     def move_along_data(self, direction):
         if self.chart:
-            self.current_column = max(0, min(self.current_column + direction, len(self.chart[self.current_series_index][0]) - 1))
-            self.tts.speak(self.get_current_data())
-        else:
-            self.tts.speak("No data loaded")
+            new_column = self.current_column + direction
+            if 0 <= new_column < len(self.chart[self.current_series_index]):
+                self.current_column = new_column
+                self.tts.speak(self.get_current_data())
 
     def move_between_rows(self, direction):
-        if self.chart and self.current_series_index == 1:
-            self.current_row = max(0, min(self.current_row + direction, len(self.chart[self.current_series_index]) - 1))
-            self.tts.speak(self.get_current_data())
-        else:
-            self.tts.speak("No candle series loaded")
+        if self.chart and self.current_series_index == 1:  # Candle series
+            new_row = self.current_row + direction
+            if 0 <= new_row < len(self.chart[self.current_series_index]):
+                self.current_row = new_row
+                self.tts.speak(self.get_current_data())
 
     def change_timeframe(self):
         self.timeframe_multiplier = (self.timeframe_multiplier + 1) % len(self.timeframes)
-        self.tts.speak(f"Current timeframe: {self.timeframes[self.timeframe_multiplier]}")
-        self.step = 60 * (60 ** self.timeframe_multiplier)
-        if self.selected_asset:
-            self.retrieve_ohlc_data()
-            self.create_chart()
+        self.tts.speak(f"Timeframe changed to {self.timeframes[self.timeframe_multiplier]}")
 
-    def change_interval(self):
-        self.interval = (self.interval * 2) % 8
-        if self.interval == 0:
-            self.interval = 1
-        self.tts.speak(f"Current interval: {self.interval} minute{'s' if self.interval > 1 else ''}")
-        if self.selected_asset:
-            self.retrieve_ohlc_data()
-            self.create_chart()
-
-
-async def main():
-    tool = TechnicalAnalysisTool()
-    await tool.run()
+    def change_interval(self, direction):
+        self.interval = max(1, self.interval + direction)
+        self.tts.speak(f"Interval changed to {self.interval}")
 
 
 if __name__ == "__main__":
-    loop = asyncio.get_event_loop()
-    loop.run_until_complete(main())
-    loop.close()
+    tool = TechnicalAnalysisTool()
+    asyncio.run(tool.run())
