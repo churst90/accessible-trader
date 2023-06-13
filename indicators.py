@@ -4,50 +4,48 @@ class Indicators:
   def __init__(self):
     pass
 
-  def vpvr(self, prices, volumes, period):
-    # Initialize the Value area high and low arrays
-    value_area_high = np.zeros(prices.shape[0])
-    value_area_low = np.zeros(prices.shape[0])
-    poc_values = np.zeros(prices.shape[0])
-    for i in range(prices.shape[0]- period):
-      # Calculate the current Value area high and low
-      high_range = np.max(prices[i:i+period])
-      low_range = np.min(prices[i:i+period])
-      value_area_high[i] = np.sum(volumes[i:i+period][(prices[i:i+period] >= high_range)]) / np.sum(volumes[i:i+period])
-      value_area_low[i] = np.sum(volumes[i:i+period][(prices[i:i+period] <= low_range)]) / np.sum(volumes[i:i+period])
-      # Get the current POC value
-      poc_values[i] = prices[np.argmax(volumes[i:i+period])]
-    return value_area_high, value_area_low, poc_values
+  def vpvr(self, prices, volumes, window_size, num_rows):
+    # Initialize the VPVR array
+    vpvr_array = np.zeros((prices.shape[0] - window_size, num_rows))
 
-  def tpo(self, high_prices, low_prices, volumes, period, tick_length):
-    # Initialize the high_range_list and low_range_list
-    high_range_list = []
-    low_range_list = []
-    total_trades_list = []
-    poc_sum = 0
-    poc_vol = 0
-    for i in range(0, high_prices.shape[0] - period):
-      # Get the current high range
-      high_range = np.min(high_prices[i:i+period])
-      high_range_list.append(high_range)
-      # Get the current low range
-      low_range = np.min(low_prices[i:i+period])
-      low_range_list.append(low_range)
-      # Get the volume within the high and low range
-      volume_within_range = volumes[i:i+period][(high_prices[i:i+period] >= low_range) & (low_prices[i:i+period] <= high_range)]
-      total_volume = volume_within_range.sum()
-      # Calculate the estimated number of trades
-      estimated_trades = total_volume / tick_length
-      total_trades_list.append(estimated_trades)
-      #calculate the point of control
-      tpo_vol = volume_within_range.sum()
-      poc_sum += (high_range + low_range) * tpo_vol
-      poc_vol += tpo_vol
-    poc = poc_sum / poc_vol
-    # Print the TPO chart with the number of ticks
-    for i in range(len(high_range_list)):
-      print(f"High: {high_range_list[i]}, ticks: {int(total_trades_list[i])}, Low: {low_range_list[i]}")
-    return high_range_list, low_range_list, total_trades_list, poc
+    for i in range(window_size, prices.shape[0]):
+      # Get the data in the current window
+      prices_window = prices[i-window_size:i]
+      volumes_window = volumes[i-window_size:i]
+
+      # Determine price levels in the current window
+      min_price, max_price = np.min(prices_window), np.max(prices_window)
+      price_levels = np.linspace(min_price, max_price, num_rows)
+
+      # Initialize volume at each level to 0
+      volume_at_levels = np.zeros(num_rows)
+
+      # Assign each price to a level and add its volume
+      for price, volume in zip(prices_window, volumes_window):
+        level = int((price - min_price) / (max_price - min_price) * num_rows)
+        volume_at_levels[level] += volume
+
+      # Normalize volume at each level and add to the VPVR array
+      vpvr_array[i-window_size] = volume_at_levels / np.sum(volume_at_levels)
+
+    return vpvr_array
+
+  def tpo(self, prices, window_size, num_rows):
+    tpo_array = np.zeros((prices.shape[0] - window_size, num_rows))
+
+    for i in range(prices.shape[0] - window_size):
+      window_prices = prices[i:i+window_size]
+      min_price, max_price = np.min(window_prices), np.max(window_prices)
+      price_bins = np.linspace(min_price, max_price, num_rows)
+
+      for j, price in enumerate(window_prices):
+        price_level = np.digitize(price, price_bins) - 1
+        tpo_array[i][price_level] += 1
+
+    # Normalize the TPO counts to form a distribution
+    tpo_array = tpo_array / np.sum(tpo_array, axis=1, keepdims=True)
+
+    return tpo_array
 
   def divergence(self, prices, rsi, period):
     # Initialize the divergence message

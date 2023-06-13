@@ -5,6 +5,7 @@ from datetime import datetime
 from speechmanager import SpeechManager
 from sonification import Sonification
 from bitstamp import BitstampAPI
+from indicators import Indicators
 
 class TechnicalAnalysisTool:
     def __init__(self):
@@ -74,7 +75,7 @@ class TechnicalAnalysisTool:
                         self.create_chart()
                     elif event.key == pygame.K_SPACE:
                         if self.current_series_index == 2:  # When focus is on the price series
-                            self.sonification.play_sine_wave_from_data(self.chart[self.current_series_index])
+                            await self.sonification.play_sine_wave_from_data(self.chart[self.current_series_index])
 
             window.fill((0, 0, 0))
             pygame.display.update()
