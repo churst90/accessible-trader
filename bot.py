@@ -190,7 +190,8 @@ class TechnicalAnalysisTool:
             else:
                 values_str = "Out of range"
 
-            return f"{series_name}, {values_str}, Timestamp: {timestamp_str}" if self.is_moving_vertically else f"{series_name}, {values_str}"
+            return f"{values_str}, Timestamp: {timestamp_str}" if self.is_moving_vertically else f"{values_str}"
+
         else:
             return "No data loaded"
 
