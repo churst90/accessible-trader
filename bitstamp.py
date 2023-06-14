@@ -1,5 +1,6 @@
 import requests
 import pandas as pd
+from datetime import datetime
 
 class BitstampAPI:
     def __init__(self):
@@ -13,13 +14,28 @@ class BitstampAPI:
         else:
             return []
 
-    def retrieve_ohlc_data(self, selected_asset, step, limit):
-        url = f"https://www.bitstamp.net/api/v2/ohlc/{selected_asset}/?step={step}&limit={limit}"
-        response = requests.get(url)
+    def retrieve_ohlc_data(self, asset, step, limit):
+        url = f"https://www.bitstamp.net/api/v2/ohlc/{asset}/"
+        params = {
+            "step": step,
+            "limit": limit
+        }
+        response = requests.get(url, params=params)
+
         if response.status_code == 200:
-            ohlc_data = response.json()
-            if "data" in ohlc_data and "ohlc" in ohlc_data["data"]:
-                data = ohlc_data["data"]["ohlc"]
-                columns = ["timestamp", "high", "open", "close", "low", "volume"]
-                return pd.DataFrame(data, columns=columns)
+            data = response.json()
+            if "data" in data and "ohlc" in data["data"]:
+                ohlc_data = data["data"]["ohlc"]
+#                print(ohlc_data)
+                ohlc_df = pd.DataFrame(ohlc_data)
+                print(ohlc_df)
+
+                # Convert to numeric values
+                ohlc_df["timestamp"] = pd.to_numeric(ohlc_df["timestamp"]).astype(int)
+                ohlc_df[["open", "high", "low", "close", "volume"]] = ohlc_df[["open", "high", "low", "close", "volume"]].astype(float)
+            
+                # Convert "Timestamp" column to datetime
+                ohlc_df["timestamp"] = pd.to_datetime(ohlc_df["timestamp"], unit='s')  # The unit parameter is set to 's' to denote that the original input is in seconds.
+                return ohlc_df
+
         return None

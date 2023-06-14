@@ -1,22 +1,26 @@
+import pandas as pd
 import pygame
-import numpy as np
 import asyncio
 from datetime import datetime
 from speechmanager import SpeechManager
 from sonification import Sonification
 from bitstamp import BitstampAPI
-from indicators import Indicators
 
 class TechnicalAnalysisTool:
     def __init__(self):
+        self.current_row_index = 0
+        self.is_moving_vertically = False
+        self.candle_columns = ["High", "Open", "Close", "Low"]
         self.sonification = Sonification()
         self.assets = []
         self.selected_asset = None
         self.ohlc_data = None
         self.chart = []
         self.current_series_index = 0
-        self.current_row = 0
-        self.current_column = 0
+        self.current_column_index = 1
+        self.current_row_index = 1
+        self.current_row = 1
+        self.current_column = 999
         self.step = 60  # in seconds
         self.timeframe_multiplier = 1
         self.interval = 1
@@ -50,8 +54,6 @@ class TechnicalAnalysisTool:
                         self.change_series(-1)
                     elif event.key == pygame.K_PAGEDOWN:
                         self.change_series(1)
-                        if self.current_series_index == 1:
-                            self.current_row = 0  # Reset row index when switching to candle series
                     elif event.key == pygame.K_RIGHT:
                         self.move_along_data(1)
                     elif event.key == pygame.K_LEFT:
@@ -90,7 +92,7 @@ class TechnicalAnalysisTool:
         selected_asset = await self.show_menu(self.assets, "Select Asset Pair")
         if selected_asset:
             self.selected_asset = selected_asset.replace("/", "").lower()
-#            self.tts.speak(f"Selected {self.selected_asset}")
+            self.tts.speak(f"Selected {self.selected_asset}")
             pygame.time.wait(1000)
 
     async def show_menu(self, options, title):
@@ -125,19 +127,42 @@ class TechnicalAnalysisTool:
 
     def create_chart(self):
         if self.ohlc_data is not None:
-            volume_series = np.array(self.ohlc_data["volume"])
-            candles_series = np.array(self.ohlc_data[["high", "open", "close", "low"]])
-            price_series = np.array(self.ohlc_data["close"])
+            # Create volume dataframe
+            volume_df = pd.DataFrame({
+                "Timestamp": self.ohlc_data["timestamp"],
+                "Volume": self.ohlc_data["volume"]
+            })
 
-            self.chart = [volume_series, candles_series, price_series]
+            # Create candles dataframe
+            candles_df = pd.DataFrame({
+                "Timestamp": self.ohlc_data["timestamp"],
+                "Open": self.ohlc_data["open"],
+                "High": self.ohlc_data["high"],
+                "Low": self.ohlc_data["low"],
+                "Close": self.ohlc_data["close"]
+            })
 
-            self.current_column = self.chart[self.current_series_index].shape[1] - 1 if len(
-                self.chart[self.current_series_index].shape) > 1 else len(self.chart[self.current_series_index]) - 1
+            # Create price dataframe
+            price_df = pd.DataFrame({
+                "Timestamp": self.ohlc_data["timestamp"],
+                "Price": self.ohlc_data["close"]
+            })
 
-            # Adjust bounds checking for candle series
-            if self.current_series_index == 1:
-                self.current_column = min(self.current_column, len(self.chart[self.current_series_index][0]) - 1)
-                self.current_row = min(self.current_row, len(self.chart[self.current_series_index]) - 1)
+            # Assign the created dataframes to the chart
+            self.chart = [volume_df, candles_df, price_df]
+
+            self.current_column_index = len(self.chart[self.current_series_index]) - 1
+            self.current_column = self.chart[self.current_series_index]["Timestamp"][self.current_column_index]
+
+            # Update the row index and row based on the number of columns in the current series
+            self.current_row_index = len(self.chart[self.current_series_index].columns) - 1
+
+            # Get the current row based on the row index
+            if 0 <= self.current_row_index < len(self.chart[self.current_series_index].columns):  # Check if row index is valid
+                self.current_row = self.chart[self.current_series_index].columns[self.current_row_index]
+            else:
+                self.current_row_index = 0
+                self.current_row = 0
 
             self.tts.speak(self.get_series_name(self.current_series_index))
             self.tts.speak(self.get_current_data())
@@ -152,49 +177,61 @@ class TechnicalAnalysisTool:
     def get_current_data(self):
         if self.chart:
             series_name = self.get_series_name(self.current_series_index)
-            timestamp = int(self.ohlc_data['timestamp'][self.current_column])  # Convert to integer
+            timestamp = pd.to_datetime(self.current_column)
 
-            if series_name == "Candles":
-                row_headers = ["High", "Open", "Close", "Low"]
-                value = self.chart[self.current_series_index][self.current_row][self.current_column]
-                values_str = f"{row_headers[self.current_row]}: {value}"
+            if pd.isnull(timestamp):
+                timestamp_str = 'NaT'
             else:
-                value = self.chart[self.current_series_index][self.current_column]
-                values_str = str(value)
+                timestamp_str = timestamp.strftime('%Y-%m-%d %H:%M:%S')  # Convert to readable format
 
-            timestamp_str = datetime.fromtimestamp(timestamp).strftime('%Y-%m-%d %H:%M:%S')  # Convert to readable format
-            return f"{timestamp_str}, {series_name}, {values_str}"
+            if self.current_row_index < len(self.chart[self.current_series_index].columns):
+                value = self.chart[self.current_series_index].loc[self.current_column_index, self.current_row]
+                values_str = f"{self.current_row}: {value}"
+            else:
+                values_str = "Out of range"
+
+            return f"{series_name}, {values_str}, Timestamp: {timestamp_str}" if self.is_moving_vertically else f"{series_name}, {values_str}"
         else:
             return "No data loaded"
 
     def change_series(self, direction):
         if self.chart:
             self.current_series_index = (self.current_series_index + direction) % len(self.chart)
-            # Reset indices when switching series
-            self.current_column = self.chart[self.current_series_index].shape[1] - 1 if len(self.chart[self.current_series_index].shape) > 1 else len(self.chart[self.current_series_index]) - 1
-            if self.current_series_index == 1:
-                self.current_column = min(self.current_column, len(self.chart[self.current_series_index][0]) - 1)
-                self.current_row = min(self.current_row, len(self.chart[self.current_series_index]) - 1)
+
+            # Reset column indices when switching series
+            self.current_column_index = len(self.chart[self.current_series_index]) - 1
+            self.current_column = self.chart[self.current_series_index]["Timestamp"].iloc[self.current_column_index]
+
+            # Set the row index to the last row (most recent row)
+            self.current_row_index = len(self.chart[self.current_series_index].columns) - 1
+
+            # Set the current row to the first cell in the row
+            self.current_row = self.chart[self.current_series_index].columns[0]
+
             self.tts.speak(self.get_series_name(self.current_series_index))
 
     def move_along_data(self, direction):
         if self.chart:
-            new_column = self.current_column + direction
+            self.is_moving_vertically = True
+            proposed_column_index = self.current_column_index + direction
 
-            if self.current_series_index == 1:  # Candle series
-                if 0 <= new_column < self.chart[self.current_series_index].shape[1]:
-                    self.current_column = new_column
-                    self.tts.speak(self.get_current_data())
-            else:
-                if 0 <= new_column < len(self.chart[self.current_series_index]):
-                    self.current_column = new_column
-                    self.tts.speak(self.get_current_data())
+            # Check if the proposed_column_index is within the valid range
+            if 0 <= proposed_column_index < len(self.chart[self.current_series_index]):
+                self.current_column_index = proposed_column_index
+                self.current_column = self.chart[self.current_series_index]["Timestamp"].iloc[self.current_column_index]
+                self.tts.speak(self.get_current_data())
+            elif proposed_column_index < 0:
+                self.tts.speak("You have reached the beginning of the data.")
 
     def move_between_rows(self, direction):
-        if self.chart and self.current_series_index == 1:  # Candle series
-            new_row = self.current_row + direction
-            if 0 <= new_row < 4:  # There are only 4 rows: OHLC
-                self.current_row = new_row
+        if self.chart:
+            self.is_moving_vertically = False
+            proposed_row_index = self.current_row_index + direction
+
+            # Check if the proposed_row_index is within the valid range
+            if 0 <= proposed_row_index < len(self.chart[self.current_series_index].columns):
+                self.current_row_index = proposed_row_index
+                self.current_row = self.chart[self.current_series_index].columns[self.current_row_index]
                 self.tts.speak(self.get_current_data())
 
     def change_timeframe(self):
@@ -217,7 +254,7 @@ class TechnicalAnalysisTool:
 
         # Update the step according to the new timeframe
         self.step = timeframe_steps[self.current_timeframe]
-        self.step = self.step*self.interval
+        self.step = self.step * self.interval
 
         self.tts.speak(f"{self.interval} {self.current_timeframe}")
 
