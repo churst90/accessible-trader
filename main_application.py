@@ -1,185 +1,156 @@
-import tkinter as tk
-import platform  # Import platform module
-from concurrent.futures import ThreadPoolExecutor
 import asyncio
-import pandas as pd
-from ui_components import UIComponents
-from chart_manager import ChartManager
-from accessibility import SpeechManager, KeyboardManager
-from sound import AudioPresenter
-from indicators.price import PriceIndicator
-from indicators.candles import CandlestickIndicator
-from indicators.macd import MACDIndicator
-from indicators.rsi import RSIIndicator
-from indicators.momentum import MomentumIndicator
-from CryptoDataFetcher import CryptoDataFetcher
-from graphics_manager import MatplotlibManager
+import platform
+import tkinter as tk
+from managers.config_manager import ConfigManager
+from core.event_bus import EventBus
+from managers.accessibility_manager import AccessibilityManager
+from managers.chart_manager import ChartManager
+from managers.matplotlib_manager import MatplotlibManager
+from managers.keyboard_manager import KeyboardManager
+from ui.dialog import Dialog
+from data_fetchers.crypto_data_fetcher import CryptoDataFetcher
+from managers.indicator_manager import IndicatorManager
 
 class MainApplication(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Accessible Trader")
-        self.geometry("3200x2400")
+        self.geometry("2400x1800")
         self.configure(bg="black")
 
-        # Instantiate managers
-        self.matplotlib_manager = MatplotlibManager(self)
-        self.speech_manager = SpeechManager()
-        self.indicators = {}  # Store all indicators by name
-        self.chart_manager = ChartManager(self, self.speech_manager, self.indicators, self.matplotlib_manager)
-        self.keyboard_manager = KeyboardManager(self.chart_manager, self.speech_manager)
-        self.ui_components = UIComponents(self, self.speech_manager)
+        # Initialize ConfigManager and EventBus
+        self.config_manager = ConfigManager()
+        self.event_bus = EventBus()
 
-        # Create the update button
-        self.update_button = self.ui_components.create_button(self, "Update Chart", self.update_chart)
+        # Initialize managers with dependency injection
+        self.indicator_manager = IndicatorManager(self.event_bus, self.config_manager)
+        self.accessibility_manager = AccessibilityManager(self.event_bus)
+        self.matplotlib_manager = MatplotlibManager(self, self.config_manager)
+        self.chart_manager = ChartManager(
+            self, self.event_bus, self.matplotlib_manager, self.accessibility_manager, self.indicator_manager
+        )
+        self.keyboard_manager = KeyboardManager(self.event_bus, self.accessibility_manager)
+        self.data_fetcher = CryptoDataFetcher(self.event_bus)
 
-        # Style controls and layout them horizontally
-        self.style_controls()
+        # Set up the main dialog
+        self.setup_main_dialog()
 
-        # Bind keyboard navigation
-        self.keyboard_manager.bind_keys(self.chart_manager.canvas.get_tk_widget())
+        # Start the event bus processing loop with a small delay to ensure the loop is running
+        self.after(100, lambda: self.event_bus.start(asyncio.get_event_loop()))
 
-        # Create ThreadPoolExecutor for background tasks
-        self.executor = ThreadPoolExecutor(max_workers=2)
+        # Subscribe to events
+        self.event_bus.subscribe("data_fetched", lambda df: asyncio.run_coroutine_threadsafe(self.on_data_fetched(df), self.async_loop))
+        self.event_bus.subscribe("exchange_selected", lambda exchange: asyncio.run_coroutine_threadsafe(self.on_exchange_selected(exchange), self.async_loop))
 
-        # Handle application close event
-        self.protocol("WM_DELETE_WINDOW", self.on_closing)
+        # Integrate asyncio loop with Tkinter's event loop
+        self.async_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self.async_loop)
+        self.after(200, self.process_events)
 
-        self.raw_ohlcv_data = pd.DataFrame()  # Store the raw OHLCV data
-        self.current_datapoint_index = 0  # Index to track the current datapoint
+    def setup_main_dialog(self):
+        fields_config = [
+            {'name': 'market', 'label': 'Market', 'type': 'dropdown', 'values': ['crypto', 'indices', 'stocks', 'forex', 'commodities']},
+            {'name': 'exchange', 'label': 'Exchange', 'type': 'dropdown', 'values': []},
+            {'name': 'asset', 'label': 'Asset Pair', 'type': 'dropdown', 'values': []},
+            {'name': 'multiplier', 'label': 'Multiplier', 'type': 'entry', 'default': '1'},
+            {'name': 'timeframe', 'label': 'Timeframe', 'type': 'dropdown', 'values': ["minute", "hour", "day", "week", "month", "year"]}
+        ]
 
-        # Initialize the AudioPresenter
-        self.audio_presenter = AudioPresenter(audio_representation={}, custom_sounds_dir=None)
+        self.dialog_frame = Dialog(
+            self, "Accessible Trader", fields_config, self.event_bus, self.accessibility_manager, is_toplevel=False
+        )
+        self.dialog_frame.grid(row=1, column=0, sticky="ew")
 
-        # Auto-refresh setup
-        self.auto_refresh = True
-        self.refresh_interval = 60000  # Default to 1 minute
+        # Add Update button
+        self.dialog_frame.create_button("Update Chart", self.update_chart, row=0, column=0)
 
-    def style_controls(self):
-        """Style the main window controls with white text and black background."""
-        self.ui_components.market_dropdown.config(background="black", foreground="white")
-        self.ui_components.exchange_dropdown.config(background="black", foreground="white")
-        self.ui_components.asset_dropdown.config(background="black", foreground="white")
-        self.ui_components.multiplier_entry.config(background="black", foreground="white")
-        self.ui_components.timeframe_dropdown.config(background="black", foreground="white")
+        # Bind selection change for the market dropdown to populate exchanges
+        self.dialog_frame.fields['market'].bind("<<ComboboxSelected>>", self.on_market_selected)
 
-        # Arrange controls horizontally
-        controls_frame = tk.Frame(self, bg="black")
-        controls_frame.pack(fill=tk.X, pady=10)
-        self.ui_components.market_dropdown.pack(side=tk.LEFT, padx=5)
-        self.ui_components.exchange_dropdown.pack(side=tk.LEFT, padx=5)
-        self.ui_components.asset_dropdown.pack(side=tk.LEFT, padx=5)
-        self.ui_components.multiplier_entry.pack(side=tk.LEFT, padx=5)
-        self.ui_components.timeframe_dropdown.pack(side=tk.LEFT, padx=5)
-        self.update_button.pack(side=tk.LEFT, padx=5)  # Now correctly references the update_button
+        # Bind selection change for the exchange dropdown to populate asset pairs
+        self.dialog_frame.fields['exchange'].bind("<<ComboboxSelected>>", self.on_exchange_selected)
 
-    def load_exchanges(self):
+        # Populate exchanges initially
+        self.populate_exchanges()
+
+    def process_events(self):
+        """Process asyncio events in the Tkinter event loop."""
+        try:
+            self.async_loop.run_until_complete(asyncio.sleep(0.1))
+        except Exception as e:
+            print(f"Error in process_events: {e}")
+        finally:
+            self.after(100, self.process_events)  # Schedule the next event processing
+
+    def populate_exchanges(self):
         exchanges = CryptoDataFetcher.get_exchanges()
-        self.ui_components.set_dropdown_values("exchange", exchanges)
-        self.ui_components.exchange_dropdown.bind("<<ComboboxSelected>>", self.load_symbols)
+        self.dialog_frame.fields['exchange']['values'] = exchanges
 
-    def load_symbols(self, event):
-        exchange_id = self.ui_components.exchange_dropdown.get()
+    async def on_market_selected(self, event):
+        market = self.dialog_frame.fields['market'].get()
+        if market == 'crypto':
+            exchanges = CryptoDataFetcher.get_exchanges()
+        else:
+            exchanges = []  # Add logic for other markets as needed
+
+        self.dialog_frame.fields['exchange']['values'] = exchanges
+        self.dialog_frame.fields['exchange'].set('')  # Clear current selection
+        self.accessibility_manager.speak("Exchanges list updated")
+
+    async def on_exchange_selected(self, event):
+        exchange_id = self.dialog_frame.fields['exchange'].get()
         if exchange_id:
-            data_fetcher = CryptoDataFetcher(exchange_id)
-            loop = asyncio.get_event_loop()
-            loop.run_until_complete(self.async_load_symbols(data_fetcher))
-
-    async def async_load_symbols(self, data_fetcher):
-        async with data_fetcher.exchange_session() as exchange:
-            symbols = exchange.symbols
-            self.ui_components.set_dropdown_values("asset", symbols)
-
-    def register_indicator(self, name, indicator_class, *args, **kwargs):
-        """Register an indicator and add it to the list of indicators."""
-        indicator = indicator_class(self.raw_ohlcv_data, *args, **kwargs)
-        self.indicators[name] = indicator
-        refined_data = indicator.calculate()
-        return refined_data
-
-    def plot_all_indicators(self):
-        """Plot all registered indicators."""
-        self.chart_manager.plot_all_indicators()
-
-    async def fetch_and_update_chart(self, exchange_id, symbol, timeframe):
-        data_fetcher = CryptoDataFetcher(exchange_id)
-        async with data_fetcher.exchange_session() as exchange:
-            ohlcv_data = await data_fetcher.fetch_ohlcv_in_batches(symbol, timeframe, use_cache=False)
-
-        if ohlcv_data.empty:
-            self.speech_manager.speak("No data available for the selected pair.")
-            return
-
-        # Convert the OHLCV data to a DataFrame and rename columns
-        self.raw_ohlcv_data = pd.DataFrame(ohlcv_data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-
-        # Convert timestamp to datetime for better readability (optional)
-        self.raw_ohlcv_data['timestamp'] = pd.to_datetime(self.raw_ohlcv_data['timestamp'], unit='ms')
-
-        # Register and calculate the Price indicator
-        price_series = self.register_indicator('Price', PriceIndicator)
-        candlestick_series = self.register_indicator('Candles', CandlestickIndicator)
-        macd_series = self.register_indicator('MACD', MACDIndicator)
-        rsi_series = self.register_indicator('RSI', RSIIndicator)
-        momentum_series = self.register_indicator('Momentum', MomentumIndicator)
-
-        # Update the chart manager with the series data and their overlay status
-        self.chart_manager.update_chart({
-            'Price': (price_series, True),  # Assuming Price is an overlay
-            'Candles': (candlestick_series, True),
-            'MACD': (macd_series, False),  # MACD requires its own axis
-            'RSI': (rsi_series, False),    # RSI requires its own axis
-            'Momentum': (momentum_series, False)  # Momentum requires its own axis
-        })
-
-        # Prepare the audio representation from all indicators
-        self.prepare_audio_representation()
-
-        self.speech_manager.speak(f"Chart loaded for {symbol}, {timeframe}. Chart has {len(self.indicators)} visible series.")
-
-    def prepare_audio_representation(self):
-        for name, indicator in self.indicators.items():
-            self.audio_presenter.audio_representation[name] = indicator.get_audio_representation()
+            symbol_list = await self.data_fetcher.get_symbols_for_exchange(exchange_id)
+            self.dialog_frame.fields['asset']['values'] = symbol_list
+            self.dialog_frame.fields['asset'].set('')  # Clear current selection
+            self.accessibility_manager.speak("Asset pairs list updated")
 
     def update_chart(self):
-        exchange_id = self.ui_components.exchange_dropdown.get()
-        symbol = self.ui_components.asset_dropdown.get()
-        multiplier = self.ui_components.multiplier_entry.get()
-        timeframe_unit = self.ui_components.timeframe_dropdown.get()
+        asyncio.run_coroutine_threadsafe(self.async_update_chart(), self.async_loop)
+
+    async def async_update_chart(self):
+        exchange_id = self.dialog_frame.fields['exchange'].get()
+        symbol = self.dialog_frame.fields['asset'].get()
+        multiplier = self.dialog_frame.fields['multiplier'].get()
+        timeframe_unit = self.dialog_frame.fields['timeframe'].get()
 
         if not exchange_id or not symbol or not multiplier or not timeframe_unit:
-            self.speech_manager.speak("Please select an exchange, asset pair, multiplier, and timeframe.")
+            await self.event_bus.async_publish(
+                "announce_speech", "Please select an exchange, asset pair, multiplier, and timeframe."
+            )
             return
 
         timeframe = f"{multiplier}{timeframe_unit[0]}"
+        await self.event_bus.async_publish("fetch_data", exchange_id, symbol, timeframe)
 
-        asyncio.run(self.fetch_and_update_chart(exchange_id, symbol, timeframe))
-        self.set_auto_refresh(int(multiplier), timeframe_unit)
+    async def on_data_fetched(self, df):
+        if df.empty:
+            await self.event_bus.async_publish("announce_speech", "No data available for the selected pair.")
+            return
 
-    def set_auto_refresh(self, multiplier, timeframe_unit):
-        if timeframe_unit == "minute":
-            self.refresh_interval = multiplier * 60 * 1000
-        elif timeframe_unit == "hour":
-            self.refresh_interval = multiplier * 60 * 60 * 1000
-        elif timeframe_unit == "day":
-            self.refresh_interval = multiplier * 24 * 60 * 60 * 1000
-        else:
-            self.refresh_interval = 60000
+        # Update the chart manager with the data
+        await self.chart_manager.update_chart({
+            'Price': (df, True),
+        })
 
-        if self.auto_refresh:
-            self.after_cancel(self.auto_refresh)
-        self.auto_refresh = self.after(self.refresh_interval, self.update_chart)
+        await self.event_bus.async_publish("announce_speech", "Chart updated with the new data.")
 
     def on_closing(self):
-        if self.auto_refresh:
-            self.after_cancel(self.auto_refresh)
-        self.executor.shutdown(wait=False)
-        self.audio_presenter.stop_audio()
+        print("Closing application...")
+        # Cancel all tasks before closing
+        for task in asyncio.all_tasks(self.async_loop):
+            print(f"Cancelling task: {task}")
+            task.cancel()
+        
+        # Stop the event loop
+        self.async_loop.call_soon_threadsafe(self.async_loop.stop)
         self.destroy()
+        print("Application closed.")
 
 if __name__ == "__main__":
     if platform.system() == 'Windows':
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
     app = MainApplication()
+    app.protocol("WM_DELETE_WINDOW", app.on_closing)
     app.mainloop()

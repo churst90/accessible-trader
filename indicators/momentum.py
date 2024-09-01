@@ -1,48 +1,24 @@
 import pandas as pd
 from .indicator_base import IndicatorBase
+from event_bus import EventBus
 
 class MomentumIndicator(IndicatorBase):
+    """Indicator for calculating the Momentum."""
+
     def __init__(self, data_frame, **kwargs):
-        super().__init__(data_frame, **kwargs)
-
-        # General settings
-        self.settings = {
-            'momentum_period': 14,
-            'smoothing_period': 1,
-            'show_zero_line': True
-        }
-
-        # Appearance settings
-        self.appearance_settings = {
-            'line_thickness': '2',
-            'positive_color': '#00FF00',  # Green
-            'negative_color': '#FF0000',  # Red
-            'zero_line_color': '#FFFFFF',  # White
-            'zero_line_thickness': '1',
-            'zero_line_style': 'dashed'
-        }
-
-        # Speech settings
-        self.speech_settings = {
-            'read_column_names': True,  # Whether to announce column names
-            'read_order': ['timestamp', 'Momentum']  # Order in which to read columns
-        }
-
-        # Sound settings
-        self.sound_settings = {
-            'enable_sounds': True,  # Whether to enable sounds for events
-            'sound_file': None  # Path to custom sound file (if any)
-        }
-
-    def is_overlay(self):
-        return False  # Momentum is typically not an overlay
+        # Initialize the base class with the relevant configuration section
+        super().__init__(data_frame, name="Momentum", config_section="momentum", **kwargs)
 
     def calculate(self):
+        """Calculate the Momentum based on the settings."""
         period = self.settings.get('momentum_period', 14)
         smoothing_period = self.settings.get('smoothing_period', 1)
-        
+        show_zero_line = self.settings.get('show_zero_line', True)
+
+        # Calculate the Momentum
         self.df['Momentum'] = self.df['close'].diff(period)
 
+        # Apply smoothing if required
         if smoothing_period > 1:
             self.df['Momentum'] = self.df['Momentum'].rolling(window=smoothing_period).mean()
 
@@ -51,19 +27,25 @@ class MomentumIndicator(IndicatorBase):
 
         # Attach plot metadata
         self.df.attrs['plot_type'] = 'line'
+        self.df.attrs['show_zero_line'] = show_zero_line
+
+        # Cache the result for reuse
+        self.cache_result('momentum_data', self.df[['timestamp', 'Momentum']])
+        
+        # Notify the event bus that the indicator has been recalculated
+        event_bus.publish(f"{self.name}_recalculated")
 
         return self.df[['timestamp', 'Momentum']]
 
-    # Speech settings methods
-    def get_speech_settings(self):
-        return self.speech_settings
+    def is_overlay(self):
+        """Return whether the indicator is an overlay on the primary chart axis."""
+        return False  # Momentum is typically not an overlay
 
-    def set_speech_settings(self, new_speech_settings):
-        self.speech_settings.update(new_speech_settings)
-
-    # Sound settings methods
-    def get_sound_settings(self):
-        return self.sound_settings
-
-    def set_sound_settings(self, new_sound_settings):
-        self.sound_settings.update(new_sound_settings)
+    def get_audio_representation(self):
+        """Return the audio representation of the Momentum data."""
+        momentum_values = self.get_cached_result('momentum_data')['Momentum'].values
+        audio_representation = {
+            'values': momentum_values,
+            'indicator_name': self.name
+        }
+        return audio_representation

@@ -1,73 +1,57 @@
 import pandas as pd
 from .indicator_base import IndicatorBase
+from event_bus import EventBus
 
 class MACDIndicator(IndicatorBase):
+    """Indicator for calculating the MACD (Moving Average Convergence Divergence)."""
+
     def __init__(self, data_frame, **kwargs):
-        super().__init__(data_frame, **kwargs)
-        
-        # General settings for MACD
-        self.settings = {
-            'fast_period': 12,  # Fast EMA period
-            'slow_period': 26,  # Slow EMA period
-            'signal_period': 9  # Signal line EMA period
-        }
-        
-        # Appearance settings for MACD line, Signal line, and Histogram
-        self.appearance_settings = {
-            'macd_line': {'line_thickness': '2', 'line_color': '#0000FF'},  # Blue
-            'signal_line': {'line_thickness': '2', 'line_color': '#FFA500'},  # Orange
-            'histogram': {
-                'positive_bar_color': '#00FF00',  # Green
-                'negative_bar_color': '#FF0000',  # Red
-                'bar_thickness': '1'
-            }
-        }
-
-        # Speech settings
-        self.speech_settings = {
-            'read_column_names': True,  # Whether to announce column names
-            'read_order': ['timestamp', 'MACD', 'Signal', 'Histogram']  # Order in which to read columns
-        }
-
-        # Sound settings
-        self.sound_settings = {
-            'enable_sounds': True,  # Whether to enable sounds for events
-            'sound_file': None  # Path to custom sound file (if any)
-        }
-
-    def is_overlay(self):
-        return False  # MACD is typically not an overlay
+        # Initialize the base class with the relevant configuration section
+        super().__init__(data_frame, name="MACD", config_section="macd", **kwargs)
 
     def calculate(self):
-        # Calculate the MACD line, Signal line, and Histogram
-        self.df['MACD'] = self.df['close'].ewm(span=self.settings['fast_period'], adjust=False).mean() - \
-                          self.df['close'].ewm(span=self.settings['slow_period'], adjust=False).mean()
-        self.df['Signal'] = self.df['MACD'].ewm(span=self.settings['signal_period'], adjust=False).mean()
+        """Calculate the MACD, Signal line, and Histogram based on the settings."""
+        fast_period = self.settings.get('fast_period', 12)
+        slow_period = self.settings.get('slow_period', 26)
+        signal_period = self.settings.get('signal_period', 9)
+
+        # Calculate the MACD line
+        self.df['MACD'] = self.df['close'].ewm(span=fast_period, adjust=False).mean() - \
+                          self.df['close'].ewm(span=slow_period, adjust=False).mean()
+        
+        # Calculate the Signal line
+        self.df['Signal'] = self.df['MACD'].ewm(span=signal_period, adjust=False).mean()
+
+        # Calculate the Histogram
         self.df['Histogram'] = self.df['MACD'] - self.df['Signal']
 
         # Attach appearance settings to the DataFrame
+        self.df.attrs.update(self.appearance_settings)
+
+        # Attach plot metadata
         self.df.attrs['plot_type'] = 'histogram'
-        self.df.attrs.update(self.appearance_settings['histogram'])
 
-        # Attach line colors and thickness to the DataFrame for MACD and Signal lines
-        self.df.attrs['macd_line_color'] = self.appearance_settings['macd_line']['line_color']
-        self.df.attrs['signal_line_color'] = self.appearance_settings['signal_line']['line_color']
-        self.df.attrs['macd_line_thickness'] = int(self.appearance_settings['macd_line']['line_thickness'])
-        self.df.attrs['signal_line_thickness'] = int(self.appearance_settings['signal_line']['line_thickness'])
+        # Cache the result for reuse
+        self.cache_result('macd_data', self.df[['timestamp', 'MACD', 'Signal', 'Histogram']])
+        
+        # Notify the event bus that the indicator has been recalculated
+        event_bus.publish(f"{self.name}_recalculated")
 
-        # Return the DataFrame with the necessary columns for charting
         return self.df[['timestamp', 'MACD', 'Signal', 'Histogram']]
 
-    # Speech settings methods
-    def get_speech_settings(self):
-        return self.speech_settings
+    def is_overlay(self):
+        """Return whether the indicator is an overlay on the primary chart axis."""
+        return False  # MACD is typically not an overlay
 
-    def set_speech_settings(self, new_speech_settings):
-        self.speech_settings.update(new_speech_settings)
-
-    # Sound settings methods
-    def get_sound_settings(self):
-        return self.sound_settings
-
-    def set_sound_settings(self, new_sound_settings):
-        self.sound_settings.update(new_sound_settings)
+    def get_audio_representation(self):
+        """Return the audio representation of the MACD data."""
+        macd_values = self.get_cached_result('macd_data')['MACD'].values
+        signal_values = self.get_cached_result('macd_data')['Signal'].values
+        histogram_values = self.get_cached_result('macd_data')['Histogram'].values
+        audio_representation = {
+            'macd_values': macd_values,
+            'signal_values': signal_values,
+            'histogram_values': histogram_values,
+            'indicator_name': self.name
+        }
+        return audio_representation

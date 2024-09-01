@@ -1,68 +1,88 @@
 from pyo import *
 import os
-import threading
+import asyncio
+from config import config_manager
 
 class AudioPresenter:
-    def __init__(self, audio_representation, custom_sounds_dir=None):
-        self.audio_representation = audio_representation
-        self.server = Server().boot()  # Initialize the pyo server
+    def __init__(self, event_bus):
+        # Initialize the pyo server and start it
+        self.server = Server().boot()
         self.server.start()
-        self.custom_sounds_dir = custom_sounds_dir  # Directory to load custom sounds from
-        self.sounds = []  # List to keep track of playing sounds
-        self.playing = False  # Track whether audio is playing
-        self.stop_signal = threading.Event()  # Signal to stop playback
-        self.playback_speed = 1.0  # Default playback speed
+        self.event_bus = event_bus
 
-    def generate_tone(self, frequency, duration=0.1, volume=0.5, pan=0.0):
-        """Generates a tone at a specific frequency, duration, volume, and panning using pyo."""
-        if self.stop_signal.is_set():
+        # Load sound settings from ConfigManager
+        self.sound_enabled = config_manager.get('sound', {}).get('sound_enabled', True)
+        self.volume_level = config_manager.get('sound', {}).get('volume_level', 0.5)
+        self.custom_sounds_dir = config_manager.get('sound', {}).get('custom_sounds_dir', None)
+
+        # Dictionary to keep track of playing sounds and playback control
+        self.sounds = {}
+
+        # Event subscriptions
+        self.subscribe_to_events()
+
+    def subscribe_to_events(self):
+        """Subscribe to necessary events from the event bus."""
+        self.event_bus.subscribe("data_fetched", self.on_data_fetched)
+        self.event_bus.subscribe("alert_triggered", self.on_alert_triggered)
+
+    async def on_data_fetched(self, data):
+        """Play a sound when new data is fetched."""
+        await self.play_sound("data_fetched")
+
+    async def on_alert_triggered(self, alert_type):
+        """Play a sound when an alert is triggered."""
+        await self.play_sound(alert_type)
+
+    async def play_sound(self, sound_type):
+        """Play a predefined sound based on the type of event."""
+        if not self.sound_enabled:
             return
-        tone = Sine(freq=frequency, mul=volume)
-        panned_tone = Pan(tone, pan=pan).out()  # Pan the sound left to right
-        time.sleep(duration)  # Sleep for the duration of the tone
-        panned_tone.stop()  # Stop the tone after the duration has passed
 
-    def play_series(self, values, duration=0.1, min_freq=200, max_freq=1000):
-        """Plays a series of tones corresponding to a list of values."""
-        min_value = min(values)
-        max_value = max(values)
-        value_range = max_value - min_value if max_value != min_value else 1
+        if self.custom_sounds_dir and os.path.exists(self.custom_sounds_dir):
+            sound_file = os.path.join(self.custom_sounds_dir, f"{sound_type}.wav")
+            if os.path.exists(sound_file):
+                await asyncio.to_thread(self._play_wav_sound, sound_file)
+                return
 
-        num_values = len(values)
-        # Adjust duration based on the number of data points and playback speed
-        duration = max(0.01, min(0.1, 5 / num_values)) / self.playback_speed
+        # Fallback to generating a tone if custom sound is not available
+        await asyncio.to_thread(self.generate_tone, 440, 0.2)  # Example tone
 
-        for i, value in enumerate(values):
-            if self.stop_signal.is_set():
-                break
-            # Map value to frequency
-            frequency = min_freq + ((value - min_value) / value_range) * (max_freq - min_freq)
-            pan = (i / (num_values - 1)) * 2 - 1  # Calculate pan position from left (-1) to right (1)
-            self.generate_tone(frequency=frequency, duration=duration, pan=pan)
+    def _play_wav_sound(self, sound_file):
+        """Helper method to play a WAV file sound."""
+        sound = SfPlayer(sound_file, loop=False, mul=self.volume_level).out()
+        self.sounds[sound_file] = sound
 
-    def play_audio(self):
-        """Starts playing all the sounds generated from the audio representation."""
-        if not self.playing:
-            self.playing = True
-            self.stop_signal.clear()
-            if 'Price' in self.audio_representation:
-                values = self.audio_representation['Price']['values']
-                threading.Thread(target=self.play_series, args=(values,)).start()
+    def generate_tone(self, frequency, duration=0.1):
+        """Generate a tone at a specific frequency and duration."""
+        if not self.sound_enabled:
+            return
 
-    def stop_audio(self):
-        """Stops all sounds."""
-        self.stop_signal.set()
-        for sound in self.sounds:
+        tone = Sine(freq=frequency, mul=self.volume_level).out()
+        time.sleep(duration)  # Blocking sleep, wrapped with asyncio.to_thread in the caller method
+        tone.stop()
+
+    def stop_all_sounds(self):
+        """Stop all playing sounds."""
+        for sound in self.sounds.values():
             sound.stop()
-        self.sounds = []
-        self.playing = False
+        self.sounds.clear()
 
-    def modify_sound(self, indicator_name, new_sound_file):
-        """Modify the sound for a specific indicator."""
-        for properties in self.audio_representation.values():
-            if properties.get('indicator_name') == indicator_name:
-                properties['custom_sound'] = new_sound_file
+    def set_volume(self, volume):
+        """Set the volume level for audio playback."""
+        self.volume_level = volume
+        config_manager.set('sound.volume_level', volume)
+
+    def modify_sound(self, sound_type, new_sound_file):
+        """Modify the sound for a specific event type."""
+        if not self.custom_sounds_dir:
+            return
+
+        custom_path = os.path.join(self.custom_sounds_dir, f"{sound_type}.wav")
+        if os.path.exists(new_sound_file):
+            os.replace(new_sound_file, custom_path)
 
     def set_playback_speed(self, speed):
-        """Adjusts the playback speed."""
-        self.playback_speed = max(0.1, min(5.0, speed))  # Limit speed between 0.1x and 5.0x
+        """Set the playback speed for sounds."""
+        for sound in self.sounds.values():
+            sound.setSpeed(speed)
