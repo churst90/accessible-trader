@@ -40,15 +40,6 @@ class RSIIndicator(IndicatorBase):
 
         self.df['RSI'] = rsi
 
-        # Attach appearance settings to the DataFrame
-        self.df.attrs.update(self.appearance_settings)
-
-        # Attach plot metadata
-        self.df.attrs['plot_type'] = 'line'
-        self.df.attrs['overbought_threshold'] = overbought_threshold
-        self.df.attrs['oversold_threshold'] = oversold_threshold
-        self.df.attrs['show_zones'] = show_zones
-
         # Cache the result for reuse
         self.cache_result('rsi_data', self.df[['timestamp', 'RSI']])
         

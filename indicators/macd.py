@@ -25,12 +25,6 @@ class MACDIndicator(IndicatorBase):
         # Calculate the Histogram
         self.df['Histogram'] = self.df['MACD'] - self.df['Signal']
 
-        # Attach appearance settings to the DataFrame
-        self.df.attrs.update(self.appearance_settings)
-
-        # Attach plot metadata
-        self.df.attrs['plot_type'] = 'histogram'
-
         # Cache the result for reuse
         self.cache_result('macd_data', self.df[['timestamp', 'MACD', 'Signal', 'Histogram']])
         

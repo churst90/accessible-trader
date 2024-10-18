@@ -37,12 +37,6 @@ class CandlestickIndicator(IndicatorBase):
         else:
             self.df['Pattern'] = None
 
-        # Attach appearance settings to the DataFrame
-        self.df.attrs.update(self.appearance_settings)
-
-        # Attach plot metadata
-        self.df.attrs['plot_type'] = 'candlestick'
-
         # Cache the result for reuse
         self.cache_result('candlestick_data', self.df[['timestamp', 'Open', 'High', 'Low', 'Close', 'Pattern']])
         

@@ -11,6 +11,7 @@ from ui.dialog import Dialog
 from data_fetchers.crypto_data_fetcher import CryptoDataFetcher
 from managers.indicator_manager import IndicatorManager
 
+
 class MainApplication(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -61,8 +62,13 @@ class MainApplication(tk.Tk):
         )
         self.dialog_frame.grid(row=1, column=0, sticky="ew")
 
-        # Add Update button
-        self.dialog_frame.create_button("Update Chart", self.update_chart, row=0, column=0)
+        # Create the button configuration
+        buttons_config = [
+            {'name': 'update_button', 'text': 'Update Chart', 'action': self.update_chart}
+        ]
+
+        # Add buttons separately using create_buttons
+        self.dialog_frame.create_buttons(buttons_config)
 
         # Bind selection change for the market dropdown to populate exchanges
         self.dialog_frame.fields['market'].bind("<<ComboboxSelected>>", self.on_market_selected)
@@ -86,7 +92,11 @@ class MainApplication(tk.Tk):
         exchanges = CryptoDataFetcher.get_exchanges()
         self.dialog_frame.fields['exchange']['values'] = exchanges
 
-    async def on_market_selected(self, event):
+    def on_market_selected(self, event):
+        """Handle market selected and update the exchange dropdown."""
+        asyncio.run_coroutine_threadsafe(self.async_on_market_selected(event), self.async_loop)
+
+    async def async_on_market_selected(self, event):
         market = self.dialog_frame.fields['market'].get()
         if market == 'crypto':
             exchanges = CryptoDataFetcher.get_exchanges()
@@ -97,7 +107,11 @@ class MainApplication(tk.Tk):
         self.dialog_frame.fields['exchange'].set('')  # Clear current selection
         self.accessibility_manager.speak("Exchanges list updated")
 
-    async def on_exchange_selected(self, event):
+    def on_exchange_selected(self, event):
+        """Handle exchange selected and update the asset dropdown."""
+        asyncio.run_coroutine_threadsafe(self.async_on_exchange_selected(event), self.async_loop)
+
+    async def async_on_exchange_selected(self, event):
         exchange_id = self.dialog_frame.fields['exchange'].get()
         if exchange_id:
             symbol_list = await self.data_fetcher.get_symbols_for_exchange(exchange_id)
@@ -141,11 +155,13 @@ class MainApplication(tk.Tk):
         for task in asyncio.all_tasks(self.async_loop):
             print(f"Cancelling task: {task}")
             task.cancel()
-        
+
         # Stop the event loop
         self.async_loop.call_soon_threadsafe(self.async_loop.stop)
+        self.async_loop.run_until_complete(self.async_loop.shutdown_asyncgens())
         self.destroy()
         print("Application closed.")
+
 
 if __name__ == "__main__":
     if platform.system() == 'Windows':

@@ -18,12 +18,6 @@ class PriceIndicator(IndicatorBase):
         else:
             raise ValueError(f"Invalid price type: {price_source}")
 
-        # Attach appearance settings to the DataFrame
-        self.df.attrs.update(self.appearance_settings)
-
-        # Attach plot metadata
-        self.df.attrs['plot_type'] = 'line'
-
         # Cache the result for reuse
         self.cache_result('price_data', self.df[['timestamp', 'Price']])
         

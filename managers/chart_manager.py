@@ -1,164 +1,144 @@
 import asyncio
 import tkinter as tk
+from utils import bind_focus_events, bind_key_navigation_events, subscribe_to_events
 
 class ChartManager:
     def __init__(self, parent, event_bus, matplotlib_manager, accessibility_manager, indicator_manager):
-        print("ChartManager: Initializing...")
         self.parent = parent
         self.event_bus = event_bus
         self.matplotlib_manager = matplotlib_manager
         self.accessibility_manager = accessibility_manager
         self.indicator_manager = indicator_manager
 
-        # Initialize series and datapoint indexes
-        self.series_names = []
-        self.current_series_index = 0
-        self.current_datapoint_index = 0
-        self.chart_series = {}
-
         # Create the canvas where the chart will be drawn
         self.canvas = tk.Canvas(self.parent, bg="darkblue")
         self.canvas.grid(row=0, column=0, sticky="nsew")
 
-        # Configure the canvas to take focus
-        self.canvas.configure(takefocus=True)
+        # Initialize series and datapoint indexes
+        self.series_names = []  # List of available series names
+        self.chart_series = {}  # Dictionary of series data
+        self.current_series_index = 0  # Index of the currently selected series
+        self.current_datapoint_index = 0  # Index of the current data point in the series
 
         # Apply accessibility features to the canvas
         self.accessibility_manager.apply_accessibility_features(self.canvas)
 
-        # Ensure the grid layout expands with the window
-        self.parent.grid_rowconfigure(0, weight=1)
-        self.parent.grid_columnconfigure(0, weight=1)
-
-        # Add the canvas to the Matplotlib figure
-        self.fig, self.ax = self.matplotlib_manager.fig, self.matplotlib_manager.primary_ax
-        self.fig.set_canvas(self.canvas)
-
-        # Bind chart navigation keys to the canvas
-        self.accessibility_manager.bind_chart_keys(self.canvas)
+        # Bind navigation keys for the chart using the utility
+        self.bind_chart_navigation_keys()
 
         # Subscribe to necessary events
-        self.subscribe_to_events()
+        self.subscribe_to_chart_events()
 
-    def subscribe_to_events(self):
-        """Subscribe to events from the EventBus."""
-        print("ChartManager: Subscribing to events...")
-        self.event_bus.subscribe("data_fetched", self.on_data_fetched)
-        self.event_bus.subscribe("chart_updated", self.announce_current_series)
+    def subscribe_to_chart_events(self):
+        """
+        Subscribe to events related to chart updates and data fetching using the centralized utility.
+        """
+        event_subscriptions = {
+            "data_fetched": self.on_data_fetched,
+            "chart_updated": self.announce_current_series
+        }
+
+        subscribe_to_events(self.event_bus, event_subscriptions)
+
+    def bind_chart_navigation_keys(self):
+        """
+        Bind chart navigation keys to the canvas using the centralized utility.
+        """
+        navigation_map = {
+            "<Left>": "previous_datapoint",
+            "<Right>": "next_datapoint",
+            "<Up>": "previous_column",
+            "<Down>": "next_column",
+            "<Prior>": "previous_series",
+            "<Next>": "next_series",
+            "<Home>": "first_datapoint_visible",
+            "<End>": "last_datapoint_visible"
+        }
+
+        bind_key_navigation_events(self.canvas, self.handle_chart_key_action, navigation_map)
+
+    async def handle_chart_key_action(self, action_name):
+        """Handle chart key actions and announce them."""
+        action_messages = {
+            "previous_datapoint": "Moved to the previous data point.",
+            "next_datapoint": "Moved to the next data point.",
+            "previous_column": "Moved to the previous column.",
+            "next_column": "Moved to the next column.",
+            "previous_series": "Moved to the previous series.",
+            "next_series": "Moved to the next series.",
+            "first_datapoint_visible": "Moved to the first visible data point.",
+            "last_datapoint_visible": "Moved to the last visible data point."
+        }
+
+        message = action_messages.get(action_name, "Unknown action.")
+        self.accessibility_manager.speak(message)
+        await self.event_bus.publish("key_action", action_name)
 
     async def on_data_fetched(self, df):
-        """Handle the 'data_fetched' event by updating the chart with the fetched data."""
-        print("ChartManager: Data fetched...")
+        """
+        Handle the 'data_fetched' event by updating the chart with the fetched data.
+        
+        :param df: A DataFrame containing the fetched data.
+        """
         if df.empty:
             await self.event_bus.publish("announce_speech", "No data available for the selected pair.")
             return
 
-        # Update the chart manager with the series data and their overlay status
-        await self.update_chart({
-            'Price': (df, True),
-        })
+        # Update the chart with the fetched data
+        await self.update_chart({'Price': (df, True)})
 
         await self.event_bus.publish("announce_speech", "Chart updated with the new data.")
 
     async def update_chart(self, series_data_dict):
-        """Update the chart with new series data asynchronously."""
-        print("ChartManager: Updating chart...")
+        """
+        Update the chart with new series data asynchronously.
+        
+        :param series_data_dict: A dictionary where the key is the series name and 
+                                 the value is a tuple (DataFrame, is_overlay).
+        """
         for name, (df, is_overlay) in series_data_dict.items():
             self.chart_series[name] = (df, is_overlay)
             if name not in self.series_names:
                 self.series_names.append(name)
+
         await self.replot_chart()
         await self.event_bus.publish("chart_updated", len(self.chart_series))
 
     async def replot_chart(self):
-        """Replot the chart with all active indicators asynchronously."""
-        print("ChartManager: Replotting chart...")
+        """
+        Replot the chart with all active series asynchronously.
+        """
         self.matplotlib_manager.clear_plot()  # Clear the plot using MatplotlibManager
-        axes = []
 
-        # Plot each indicator managed by IndicatorManager
-        for indicator in self.indicator_manager.get_all_indicators():
-            df = indicator.calculate()
-            if indicator.is_overlay():
-                ax = self.matplotlib_manager.primary_ax
-            else:
-                ax = self.matplotlib_manager.create_secondary_axis(len(self.chart_series) + 1, len(axes) + 2)
-            self.matplotlib_manager.plot_data(ax, df, label=indicator.name)
-            axes.append(ax)
+        # Loop through the series and plot them
+        for name, (df, is_overlay) in self.chart_series.items():
+            self.matplotlib_manager.plot_data(self.matplotlib_manager.primary_ax, df, label=name)
 
-        # Adjust the layout to avoid overlap
-        self.matplotlib_manager.draw_plot()
-
-    def get_current_series(self):
-        """Retrieve the currently selected series."""
-        print("ChartManager: Getting current series...")
-        if self.has_valid_series():
-            current_series_name = self.series_names[self.current_series_index]
-            return self.chart_series[current_series_name][0]
-        return None
-
-    def has_valid_series(self):
-        """Check if the current series index is valid."""
-        print("ChartManager: Checking for valid series...")
-        return len(self.series_names) > 0 and self.current_series_index < len(self.series_names)
+        self.matplotlib_manager.draw_plot()  # Redraw the plot
 
     async def announce_current_series(self):
-        """Announce the data for the current series and data point asynchronously."""
-        print("ChartManager: Announcing current series...")
+        """
+        Announce the current series and data point.
+        This method will provide accessible information for the user about the current state of the chart.
+        """
         current_series = self.get_current_series()
+
         if current_series is not None:
-            data = current_series.iloc[self.current_datapoint_index]
-            current_series_name = self.series_names[self.current_series_index]
-            await self.event_bus.publish("announce_speech", f"{current_series_name} series, Data: {data}")
+            # Assuming you have some method to get the data for the current data point
+            data_point = current_series.iloc[self.current_datapoint_index]
+            series_name = self.series_names[self.current_series_index]
 
-    async def previous_series(self):
-        """Navigate to the previous series in the chart asynchronously."""
-        print("ChartManager: Moving to previous series...")
-        if self.series_names:
-            self.current_series_index = (self.current_series_index - 1) % len(self.series_names)
-            await self.announce_current_series()
-
-    async def next_series(self):
-        """Navigate to the next series in the chart asynchronously."""
-        print("ChartManager: Moving to next series...")
-        if self.series_names:
-            self.current_series_index = (self.current_series_index + 1) % len(self.series_names)
-            await self.announce_current_series()
-
-    async def previous_datapoint(self):
-        """Navigate to the previous data point within the current series asynchronously."""
-        print("ChartManager: Moving to previous data point...")
-        if self.has_valid_series():
-            self.current_datapoint_index = max(0, self.current_datapoint_index - 1)
-            await self.announce_current_series()
+            # Announce the data point using the accessibility manager
+            message = f"Series: {series_name}, Data: {data_point}"
+            await self.event_bus.publish("announce_speech", message)
         else:
-            await self.event_bus.publish("announce_speech", "No data available to navigate.")
+            await self.event_bus.publish("announce_speech", "No data available for announcement.")
 
-    async def next_datapoint(self):
-        """Navigate to the next data point within the current series asynchronously."""
-        print("ChartManager: Moving to next data point...")
-        if self.has_valid_series():
-            self.current_datapoint_index = min(len(self.get_current_series().iloc[:, 0]) - 1, self.current_datapoint_index + 1)
-            await self.announce_current_series()
-        else:
-            await self.event_bus.publish("announce_speech", "No data available to navigate.")
-
-    async def first_datapoint(self):
-        """Navigate to the first data point within the current series asynchronously."""
-        print("ChartManager: Moving to first data point...")
-        if self.has_valid_series():
-            self.current_datapoint_index = 0
-            await self.announce_current_series()
-
-    async def last_datapoint(self):
-        """Navigate to the last data point within the current series asynchronously."""
-        print("ChartManager: Moving to last data point...")
-        if self.has_valid_series():
-            self.current_datapoint_index = len(self.get_current_series().iloc[:, 0]) - 1
-            await self.announce_current_series()
-
-    async def open_settings_dialog(self):
-        """Open the settings dialog asynchronously."""
-        print("ChartManager: Opening settings dialog...")
-        await self.event_bus.publish("announce_speech", "Settings dialog opened.")
-        # You would add code here to actually open the settings dialog if it exists
+    def get_current_series(self):
+        """
+        Retrieve the current series being viewed on the chart.
+        This method should return the currently selected data series.
+        """
+        if self.series_names and self.current_series_index < len(self.series_names):
+            return self.chart_series[self.series_names[self.current_series_index]][0]
+        return None

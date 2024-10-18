@@ -7,28 +7,37 @@ class IndicatorBase(ABC):
     """Base class for all technical indicators."""
     
     def __init__(self, data_frame, name, config_section, **kwargs):
+        """
+        Initialize the base indicator class.
+
+        :param data_frame: The pandas DataFrame containing the raw data.
+        :param name: The name of the indicator.
+        :param config_section: The configuration section key for loading settings.
+        :param kwargs: Additional settings that can override the configuration file.
+        """
         self.df = data_frame
         self.name = name
         self.config_section = config_section
-        self.settings = config_manager.get(config_section, {})
-        self.appearance_settings = self.settings.get('appearance', {})
-        self.speech_settings = self.settings.get('speech', {})
-        self.sound_settings = self.settings.get('sound', {})
-        self.event_subscriptions = []
+        self.cache = {}
 
-        # Update settings with any provided keyword arguments
+        # Load settings for the indicator from the configuration and apply any overrides.
+        self.load_settings()
+        
+        # Update settings with any provided keyword arguments.
         self.settings.update(kwargs)
 
         # Cache for calculated values
-        self.cache = {}
+        self.event_subscriptions = []
 
-        # Subscribe to settings updates
+        # Subscribe to settings updates.
         self.subscribe_to_settings_updates()
 
-    @abstractmethod
-    def calculate(self):
-        """Calculate the indicator values based on the data."""
-        pass
+    def load_settings(self):
+        """Load settings from the configuration file and apply them."""
+        self.settings = config_manager.get(self.config_section, {})
+        self.appearance_settings = self.settings.get('appearance', {})
+        self.speech_settings = self.settings.get('speech', {})
+        self.sound_settings = self.settings.get('sound', {})
 
     def get_settings(self):
         """Return the current settings for the indicator."""
@@ -96,6 +105,11 @@ class IndicatorBase(ABC):
         """Cleanup any resources and unsubscribe from events."""
         for subscription in self.event_subscriptions:
             event_bus.unsubscribe(subscription)
+
+    @abstractmethod
+    def calculate(self):
+        """Calculate the indicator values based on the data."""
+        pass
 
     @abstractmethod
     def is_overlay(self):

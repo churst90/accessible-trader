@@ -1,4 +1,5 @@
 import asyncio
+from utils import bind_key_navigation_events
 
 class KeyboardManager:
     def __init__(self, event_bus, accessibility_manager):
@@ -6,26 +7,31 @@ class KeyboardManager:
         self.accessibility_manager = accessibility_manager
 
     def bind_keys(self, widget):
-        """Bind global keys for navigation."""
-        widget.bind("<Prior>", self.wrap_key_event("previous_series"))  # Page Up
-        widget.bind("<Next>", self.wrap_key_event("next_series"))  # Page Down
-        widget.bind("<Left>", self.wrap_key_event("previous_datapoint"))  # Left Arrow
-        widget.bind("<Right>", self.wrap_key_event("next_datapoint"))  # Right Arrow
-        widget.bind("<Home>", self.wrap_key_event("first_datapoint"))  # Home key
-        widget.bind("<End>", self.wrap_key_event("last_datapoint"))  # End key
-        widget.bind("<F12>", self.wrap_key_event("open_settings_dialog"))  # Bind F12 to open settings dialog
+        """
+        Bind global keys for navigation on the given widget (e.g., chart or dialog).
+        This function will use the centralized `bind_navigation_keys` utility function.
+        """
+        navigation_map = {
+            "<Prior>": "previous_series",  # Page Up
+            "<Next>": "next_series",       # Page Down
+            "<Left>": "previous_datapoint",  # Left Arrow
+            "<Right>": "next_datapoint",    # Right Arrow
+            "<Home>": "first_datapoint",    # Home key
+            "<End>": "last_datapoint",      # End key
+            "<F12>": "open_settings_dialog"  # F12 key to open settings
+        }
 
-    def wrap_key_event(self, action_name):
-        """Wrap key event to handle async functions."""
-        async def handler(event):
-            await self.event_bus.publish("key_action", action_name)
-            action_method = getattr(self.accessibility_manager, action_name, None)
-            if action_method:
-                await action_method()
-            else:
-                print(f"No method found for action: {action_name}")
-        return lambda event: asyncio.run(handler(event))
+        # Use the utility function to bind keys to the widget
+        bind_navigation_keys(widget, navigation_map, self.handle_key_action)
 
-    def bind_chart_keys(self, canvas):
-        """Bind keys specifically for chart navigation when focus is on the chart area."""
-        self.bind_keys(canvas)
+    def handle_key_action(self, action_name):
+        """
+        Handle the action triggered by a key press.
+        Publishes the action to the event bus and performs any necessary tasks.
+        """
+        asyncio.run(self.event_bus.publish("key_action", action_name))
+        action_method = getattr(self.accessibility_manager, action_name, None)
+        if action_method:
+            asyncio.run(action_method())
+        else:
+            print(f"No method found for action: {action_name}")

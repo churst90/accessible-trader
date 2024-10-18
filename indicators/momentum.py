@@ -22,13 +22,6 @@ class MomentumIndicator(IndicatorBase):
         if smoothing_period > 1:
             self.df['Momentum'] = self.df['Momentum'].rolling(window=smoothing_period).mean()
 
-        # Attach appearance settings to the DataFrame
-        self.df.attrs.update(self.appearance_settings)
-
-        # Attach plot metadata
-        self.df.attrs['plot_type'] = 'line'
-        self.df.attrs['show_zero_line'] = show_zero_line
-
         # Cache the result for reuse
         self.cache_result('momentum_data', self.df[['timestamp', 'Momentum']])
         
