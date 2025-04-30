@@ -1,0 +1,10 @@
+/* assets/css/dark-theme.css */
+
+/* Dark theme overrides when [data-theme="dark"] is set on <html> */
+[data-theme="dark"] {
+  --background-color: #121212;
+  --text-color: #e0e0e0;
+  --card-bg: #1e1e1e;
+  --accent-color: #66b2ff;
+  --border-color: #333333;
+}

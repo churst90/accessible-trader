@@ -1,0 +1,10 @@
+/* assets/css/light-theme.css */
+
+/* Explicitly reaffirm light theme custom-properties */
+:root {
+  --background-color: #ffffff;
+  --text-color: #000000;
+  --card-bg: #f9f9f9;
+  --accent-color: #007bff;
+  --border-color: #cccccc;
+}
