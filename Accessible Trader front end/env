@@ -1,7 +1,0 @@
-# switch DB_CONNECTION to pgsql and port to 5432
-DB_CONNECTION=pgsql
-DB_HOST=localhost
-DB_PORT=5432
-DB_DATABASE=markettrader_db
-DB_USERNAME=admin
-DB_PASSWORD=admin
