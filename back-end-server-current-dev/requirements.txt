@@ -1,0 +1,39 @@
+# Quart framework for asynchronous web applications and hypercorn
+quart
+hypercorn
+
+# Quart-CORS for Cross-Origin Resource Sharing
+quart-cors
+
+# python websockets module
+websockets
+
+# CCXT library for cryptocurrency exchange data
+ccxt
+
+# Asyncpg for asynchronous PostgreSQL connections
+asyncpg
+
+# Aioredis for Redis caching and redis
+aioredis
+redis
+
+# Bcrypt for secure password hashing
+bcrypt
+
+# PyJWT for JWT token generation and validation
+PyJWT
+
+# Python-dotenv for environment variable management
+python-dotenv
+
+# Pandas for data manipulation and OHLCV transformations
+pandas
+
+# JSON handling and serialization (used for WebSocket messaging)
+ujson
+
+# Optional dependencies for development and testing
+pytest
+pytest-asyncio
+pytest-mock
