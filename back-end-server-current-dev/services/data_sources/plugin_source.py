@@ -1,220 +1,207 @@
 # services/data_sources/plugin_source.py
 
 import logging
-import time # Added import for time.time()
-from typing import Dict, List, Optional, Any
+from typing import Any, Dict, List, Optional
 
-from quart import current_app
-from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type
-from plugins.base import MarketPlugin, PluginError
-from utils.db_utils import insert_ohlcv_to_db
-from utils.timeframes import UNIT_MS, _parse_timeframe_str # Added _parse_timeframe_str
+from plugins.base import (
+    OHLCVBar,
+    MarketPlugin, # For type hinting self.plugin
+    PluginError,
+    AuthenticationPluginError,
+    NetworkPluginError,
+    PluginFeatureNotSupportedError
+)
+from services.data_sources.base import (
+    DataSource,
+    DataSourceError, # Base error for this layer
+    AuthenticationDataSourceError,
+    DataSourceNetworkError,
+    DataSourceFeatureNotSupportedError
+)
 
-from .base import DataSource
-# Assuming Cache is imported elsewhere or handled by forward reference
-# from services.cache_manager import Cache # Example if direct import needed for type hints outside methods
+# Forward declaration for type hinting MarketService to avoid circular import
+if False:
+    from services.market_service import MarketService
 
-logger = logging.getLogger("PluginSource")
-
+logger = logging.getLogger(__name__)
 
 class PluginSource(DataSource):
     """
-    DataSource for fetching OHLCV bars from external plugins.
+    PluginSource is a data source that fetches OHLCV data directly from a
+    configured and instantiated market plugin (e.g., CryptoPlugin, AlpacaPlugin).
 
-    Fetches bars using the plugin's native timeframe support when available, falling back to
-    1-minute bars and resampling. Stores fetched bars in the database and cache.
-
-    Attributes:
-        market (str): The market identifier (e.g., "crypto", "stocks").
-        provider (str): The provider identifier (e.g., "binance", "alpaca").
-        symbol (str): The trading pair symbol (e.g., "BTC/USD").
-        plugin (MarketPlugin): The plugin instance for data fetching.
-        cache (Optional[Cache]): Cache manager for storing bars.
-        resampler (Resampler): Resampler for converting 1m bars to higher timeframes.
-        chunk_size (int): Maximum number of bars to fetch per plugin request.
+    It acts as an adapter between the DataSource interface used by DataOrchestrator
+    and the MarketPlugin interface implemented by individual plugins.
+    This class does not handle pagination or resampling itself; that is managed
+    by the DataOrchestrator. It simply executes a fetch request on the plugin
+    for the given parameters.
     """
 
     def __init__(
         self,
-        market: str,
-        provider: str,
-        symbol: str,
         plugin: MarketPlugin,
-        cache: Optional["Cache"],  # String type hint to avoid circular import
-        resampler: "Resampler",
+        market: str,
+        provider: str, # This should match plugin.provider_id
+        symbol: str,
+        # market_service: Optional['MarketService'] = None # Kept if needed for future advanced interactions
+                                                       # but typically not used for basic fetch.
     ):
         """
-        Initialize the PluginSource.
+        Initializes the PluginSource with a specific plugin instance and its context.
 
         Args:
-            market (str): The market identifier.
-            provider (str): The provider identifier.
-            symbol (str): The trading pair symbol.
-            plugin (MarketPlugin): The plugin instance.
-            cache (Optional[Cache]): Cache manager instance (e.g., RedisCache).
-            resampler (Resampler): Resampler instance.
-
-        Raises:
-            ValueError: If market, provider, or sources are invalid.
+            plugin (MarketPlugin): The instantiated and configured plugin object
+                                   (e.g., CryptoPlugin instance for 'binance',
+                                   AlpacaPlugin instance for 'alpaca') to fetch data from.
+            market (str): The market identifier (e.g., 'crypto', 'stocks') this source operates on.
+            provider (str): The provider identifier (e.g., 'binance', 'alpaca') this source uses,
+                            which must match the provider_id the plugin instance is configured for.
+            symbol (str): The trading symbol (e.g., 'BTC/USD', 'AAPL') this source is for.
+            # market_service (Optional['MarketService']): The main MarketService instance.
+            #                                            Currently not used directly by PluginSource's
+            #                                            core fetch logic but kept for potential future extensions.
         """
-        # Removed symbol check here, as it's set dynamically per fetch now.
-        if not market or not provider:
-            raise ValueError("market and provider must be non-empty strings")
-        self.market = market
-        self.provider = provider
-        self.symbol = symbol # Keep initial symbol, but expect it to be updated
-        self.plugin = plugin
-        self.cache = cache
-        self.resampler = resampler
-        self.chunk_size = int(current_app.config.get("DEFAULT_PLUGIN_CHUNK_SIZE", 500))
+        super().__init__(source_id=f"plugin:{market}:{provider}:{symbol}") # Unique ID for this source instance
+        
+        if not isinstance(plugin, MarketPlugin):
+            raise ValueError("PluginSource must be initialized with a valid MarketPlugin instance.")
+        if not market or not provider or not symbol:
+            raise ValueError("Market, provider, and symbol must be non-empty for PluginSource.")
+        if provider.lower() != plugin.provider_id.lower():
+            raise ValueError(
+                f"PluginSource provider '{provider}' does not match "
+                f"plugin's configured provider_id '{plugin.provider_id}'."
+            )
 
-    # Note: symbol attribute is updated by DataOrchestrator before calling fetch_ohlcv
+        self.plugin: MarketPlugin = plugin
+        self.market: str = market
+        self.provider: str = provider # This is self.plugin.provider_id
+        self.symbol: str = symbol
+        # self.market_service = market_service
 
-    @retry(
-        stop=stop_after_attempt(3),
-        wait=wait_fixed(1),
-        retry=retry_if_exception_type(PluginError),
-        after=lambda retry_state: logger.warning(
-            f"Plugin retry attempt {retry_state.attempt_number} failed for {self.symbol}/{self.timeframe}" # Added symbol/timeframe for context
-        ),
-    )
+        logger.info(
+            f"PluginSource '{self.source_id}' initialized, using plugin class '{plugin.__class__.__name__}' "
+            f"configured for provider '{plugin.provider_id}'."
+        )
+
     async def fetch_ohlcv(
         self,
-        timeframe: str, # The requested timeframe (e.g., '5h')
+        timeframe: str,
         since: Optional[int],
-        before: Optional[int],
-        limit: int, # The target number of bars for 'timeframe' (e.g., 200)
-    ) -> List[Dict[str, Any]]:
+        before: Optional[int], # Corresponds to 'until' or similar in DataOrchestrator
+        limit: int,
+        # params is not part of DataSource ABC, DataOrchestrator prepares it for plugin
+    ) -> List[OHLCVBar]:
         """
-        Fetch OHLCV bars from the plugin, preferring native timeframe if supported,
-        falling back to 1-minute bars and resampling.
+        Fetches OHLCV (Open, High, Low, Close, Volume) data by calling the
+        `Workspace_historical_ohlcv` method on the configured plugin instance.
+
+        This method is typically called by DataOrchestrator's paging logic to fetch
+        a specific chunk of data.
+
+        Args:
+            timeframe (str): The timeframe for the OHLCV data (e.g., '1m', '5m', '1H').
+                             This should be a timeframe the underlying plugin can handle,
+                             often "1m" if DataOrchestrator intends to resample, or the
+                             target timeframe if the plugin supports it natively.
+            since (Optional[int]): Timestamp in milliseconds for the start of the data range (inclusive).
+            before (Optional[int]): Timestamp in milliseconds for the end of the data range (exclusive).
+                                   This will be mapped to the plugin's 'until' or equivalent parameter.
+            limit (int): The maximum number of bars to fetch in this single call to the plugin.
+
+        Returns:
+            List[OHLCVBar]: A list of OHLCV bars from the plugin.
+
+        Raises:
+            DataSourceFeatureNotSupportedError: If the plugin doesn't support fetching OHLCV.
+            AuthenticationDataSourceError: If plugin authentication fails.
+            DataSourceNetworkError: For network issues with the plugin.
+            DataSourceError: For other plugin-related errors.
         """
-        if not self.symbol:
-             logger.error("PluginSource: symbol is not set before fetch_ohlcv.")
-             return [] # Cannot fetch without a symbol
+        log_context = f"{self.symbol}@{timeframe} (since={since}, before={before}, limit={limit})"
+        logger.debug(f"PluginSource '{self.source_id}': Fetching OHLCV for {log_context}")
 
-
-        # Determine the timeframe to fetch from the plugin (always 1m for CryptoPlugin unless native is supported)
-        try:
-            # Assuming self.plugin.supported_timeframes handles potential errors or lack of support
-            supported_plugin_tfs = await self.plugin.supported_timeframes(self.provider, self.symbol)
-            # Use the requested timeframe if the plugin supports it natively, otherwise fall back to 1m
-            fetch_timeframe = timeframe if timeframe in supported_plugin_tfs else '1m'
-            if timeframe != fetch_timeframe:
-                 logger.debug(f"Plugin '{self.plugin.__class__.__name__}' does not natively support '{timeframe}', fetching '{fetch_timeframe}' for resampling.")
-        except Exception as e:
-            logger.warning(f"Could not get supported timeframes for {self.provider}/{self.symbol} from plugin: {e}. Assuming fetch_timeframe is 1m if requested timeframe is not 1m.", exc_info=True)
-            fetch_timeframe = '1m' if timeframe != '1m' else '1m' # Default to 1m fallback logic if supported check fails
-
-
-        # Calculate how many bars of 'fetch_timeframe' are needed to satisfy the 'limit' of 'timeframe'
-        # This is crucial for resampling higher timeframes from lower ones.
-        fetch_limit = limit # Default: if timeframe matches fetch_timeframe or fallback calculation fails
-
-        if timeframe != fetch_timeframe:
-            try:
-                # Get periods in milliseconds for calculation
-                _, _, target_period_ms = _parse_timeframe_str(timeframe)
-                _, _, fetch_period_ms = _parse_timeframe_str(fetch_timeframe)
-
-                if fetch_period_ms > 0 and target_period_ms >= fetch_period_ms:
-                    # Calculate the ratio of the target timeframe period to the fetched timeframe period
-                    ratio = target_period_ms // fetch_period_ms
-                    # We need roughly 'limit' * ratio bars + a buffer to cover time boundary issues
-                    fetch_limit = limit * ratio + ratio + 200 # Add a buffer (e.g., 200 bars)
-                    logger.debug(f"Calculated needed {fetch_timeframe} bars based on {timeframe} limit {limit}: {fetch_limit}")
-                elif target_period_ms < fetch_period_ms:
-                     logger.warning(f"Requested timeframe '{timeframe}' is smaller than plugin's fetch timeframe '{fetch_timeframe}'. Fetching with limit {limit}.")
-                     fetch_limit = limit # If somehow fetching a larger TF to resample to a smaller one (unusual)
-                else:
-                    logger.warning(f"Fetch timeframe period is zero for '{fetch_timeframe}' or target period is smaller, cannot accurately calculate fetch_limit.")
-                    # Fallback to original limit
-
-            except ValueError:
-                logger.warning(f"Invalid timeframe string for period calculation ('{timeframe}' or '{fetch_timeframe}'), using default fetch_limit = limit.", exc_info=True)
-                fetch_limit = limit # Fallback
-
-        # Clamp the calculated fetch_limit by the plugin's max chunk size to avoid excessively large single requests
-        actual_plugin_fetch_limit = min(fetch_limit, self.chunk_size) # Use self.chunk_size as the max plugin limit
-
-        logger.debug(f"PluginSource: Fetching {actual_plugin_fetch_limit} bars of {fetch_timeframe} for {self.symbol} (requested {timeframe} limit {limit}) since {since} before {before}")
-
-
-        # Calculate 'since' timestamp for the plugin request
-        # If the original 'since' is None, estimate a 'since' timestamp that would cover
-        # 'actual_plugin_fetch_limit' bars ending around 'before' (or now).
-        fetch_since = since
-        # Only estimate fetch_since if the original 'since' is None
-        if fetch_since is None:
-            try:
-                 _, _, fetch_period_ms = _parse_timeframe_str(fetch_timeframe)
-                 if fetch_period_ms > 0:
-                     # Calculate the estimated start time based on the number of bars we are about to fetch
-                     # Use 'before' if provided, otherwise use current time
-                     end_time_ms = before if before is not None else int(time.time() * 1000)
-                     # Estimate start time by subtracting the duration of the bars to be fetched
-                     # Add a buffer of one period to ensure the 'before' boundary is handled correctly
-                     estimated_start_time_ms = end_time_ms - (actual_plugin_fetch_limit * fetch_period_ms) - fetch_period_ms
-                     fetch_since = estimated_start_time_ms
-                     logger.debug(f"PluginSource: Estimated fetch_since based on limit and timeframe: {fetch_since}")
-                 else:
-                     logger.warning(f"Fetch timeframe period is zero for '{fetch_timeframe}', cannot estimate fetch_since based on limit.")
-                     fetch_since = None # Cannot estimate, pass None or rely on plugin default
-            except ValueError:
-                 logger.warning(f"Invalid fetch timeframe '{fetch_timeframe}' for since calculation, skipping estimation.", exc_info=True)
-                 fetch_since = None # Fallback
-
+        # Construct the 'params' argument for the plugin if 'before' (until) is provided.
+        # The plugin's fetch_historical_ohlcv method expects 'params' for such things.
+        plugin_params: Dict[str, Any] = {}
+        if before is not None:
+            plugin_params['until_ms'] = before # Plugins should know to look for 'until_ms' or similar
+                                            # Example: AlpacaPlugin maps this to 'end'
+                                            # CryptoPlugin (CCXT) can take 'until' in its 'params' dict
 
         try:
-            bars = await self.plugin.fetch_historical_ohlcv(
-                provider=self.provider,
+            # Call the underlying plugin's method
+            # The plugin instance (self.plugin) is already configured for the correct provider.
+            fetched_bars: List[OHLCVBar] = await self.plugin.fetch_historical_ohlcv(
                 symbol=self.symbol,
-                timeframe=fetch_timeframe, # Pass the actual timeframe being fetched (e.g., '1m')
-                since=fetch_since,  # Use the calculated fetch_since (can still be None if calculation failed or original since was None)
-                limit=actual_plugin_fetch_limit, # Use the calculated and clamped limit for the 1m fetch
-                # Pass original params if needed, but typically not for core OHLCV fetch
-                # params=params # Example
+                timeframe=timeframe,
+                since=since,
+                limit=limit,
+                params=plugin_params if plugin_params else None # Pass None if empty for cleaner plugin calls
             )
-            if not bars:
-                logger.debug(f"Plugin returned no data for {fetch_timeframe} for {self.symbol} in range {since}-{before}")
-                return []
 
-            # Sort bars by timestamp ascending, important for resampling
-            bars.sort(key=lambda b: b.get("timestamp", 0))
+            if not fetched_bars:
+                logger.debug(f"PluginSource '{self.source_id}': Plugin returned no data for {log_context}.")
+            else:
+                logger.info(f"PluginSource '{self.source_id}': Successfully fetched {len(fetched_bars)} bars for {log_context} from plugin.")
+            
+            return fetched_bars
 
-            # Store fetched bars (these are fetch_timeframe bars, e.g. 1m)
-            # This logic is correct; it stores the raw data from the plugin
-            await insert_ohlcv_to_db(self.market, self.provider, self.symbol, fetch_timeframe, bars)
-            # Only store 1m bars in the dedicated 1m cache
-            if self.cache and fetch_timeframe == '1m':
-                try:
-                    await self.cache.store_1m_bars(self.market, self.provider, self.symbol, bars)
-                    logger.debug(f"Stored {len(bars)} {fetch_timeframe} bars in cache")
-                except Exception as e:
-                    logger.warning(f"Failed to store {fetch_timeframe} bars in cache: {e}", exc_info=True)
+        except PluginFeatureNotSupportedError as e:
+            logger.warning(f"PluginSource '{self.source_id}': Feature not supported by plugin for {log_context}. Error: {e}")
+            raise DataSourceFeatureNotSupportedError(f"Plugin does not support required feature: {e.feature_name}",) from e
+        except AuthenticationPluginError as e:
+            logger.error(f"PluginSource '{self.source_id}': Authentication error with plugin for {log_context}. Error: {e}")
+            raise AuthenticationDataSourceError(f"Plugin authentication failed: {e.args[0] if e.args else str(e)}",) from e
+        except NetworkPluginError as e:
+            logger.error(f"PluginSource '{self.source_id}': Network error with plugin for {log_context}. Error: {e}")
+            raise DataSourceNetworkError(f"Plugin network error: {e.args[0] if e.args else str(e)}",) from e
+        except PluginError as e: # Catch other generic PluginErrors
+            logger.error(f"PluginSource '{self.source_id}': Plugin error for {log_context}. Error: {e}")
+            raise DataSourceError(f"General plugin error: {e.args[0] if e.args else str(e)}",) from e
+        except Exception as e: # Catch any other unexpected exception from the plugin call
+            logger.exception(f"PluginSource '{self.source_id}': Unexpected error during plugin OHLCV fetch for {log_context}. Error: {e}")
+            raise DataSourceError(f"Unexpected error fetching data via plugin: {str(e)}",) from e
 
+    def supports_timeframe(self, timeframe: str) -> bool:
+        """
+        Checks if the underlying plugin supports the given timeframe.
+        This now attempts to call the plugin's `validate_timeframe` if available,
+        otherwise defaults to True (relying on resampling or plugin's own validation).
+        """
+        # This method is synchronous as per DataSource ABC, but plugin.validate_timeframe is async.
+        # This indicates a potential mismatch or that supports_timeframe in DataSource
+        # should ideally be async if it needs to call async plugin methods.
+        # For now, we can't directly await here.
+        # A common pattern if the check is quick/cached in plugin:
+        # Or, this method could primarily rely on what DataOrchestrator knows.
+        # Let's assume for now it's a quick check or a pre-loaded capability.
+        #
+        # A more robust synchronous check here would require the plugin to expose
+        # its supported timeframes synchronously or for this method to be async.
+        # Given the current `MarketPlugin.validate_timeframe` is async, we cannot call it here directly.
+        #
+        # Option 1: PluginSource doesn't intelligently check, DataOrchestrator does before calling.
+        # Option 2: Plugin pre-loads/caches supported timeframes and provides a sync getter.
+        # Option 3: Change DataSource ABC supports_timeframe to be async (bigger change).
 
-            # Resample if needed
-            if fetch_timeframe != timeframe and bars: # Ensure bars is not empty before resampling
-                logger.debug(f"Resampling {len(bars)} {fetch_timeframe} bars to {timeframe}")
-                resampled_bars = self.resampler.resample(bars, timeframe) # 'resampled_bars' holds the resampled data
-                logger.debug(f"Resampling resulted in {len(resampled_bars)} {timeframe} bars")
-                # Return the resampled bars. Final filtering will happen in DataOrchestrator/CacheSource.
-                return resampled_bars
+        # For now, let's keep it simple and assume the DataOrchestrator makes the decision
+        # about whether to call this PluginSource based on its knowledge of the plugin's capabilities.
+        # If PluginSource is called, it means DataOrchestrator believes this timeframe
+        # (or '1m' for resampling) is appropriate for this plugin.
+        
+        # If `self.plugin` had a synchronous way to check, we'd use it. Example:
+        # if hasattr(self.plugin, 'is_timeframe_supported_sync'): # Fictional sync method
+        #     return self.plugin.is_timeframe_supported_sync(timeframe)
+        
+        logger.debug(f"PluginSource '{self.source_id}': supports_timeframe called for '{timeframe}'. Defaulting to True (relies on DataOrchestrator/Plugin to handle).")
+        return True # Defaulting to True, actual validation/capability check happens in DataOrchestrator or the plugin itself.
 
-            # If no resampling needed (because fetch_timeframe == timeframe), return the fetched bars directly
-            logger.debug(f"PluginSource returning {len(bars)} {timeframe} bars (no resampling needed)")
-            return bars # Return the original bars if timeframe was 1m
-
-
-        except PluginError as e:
-            # Re-raise plugin errors so they can be handled by the caller (DataOrchestrator)
-            logger.error(f"Plugin fetch failed for {self.symbol}/{timeframe}: {e}", exc_info=True)
-            raise
-
-        except Exception as e:
-            # Catch any other unexpected errors during the fetch or resampling process
-            logger.error(f"An unexpected error occurred in PluginSource.fetch_ohlcv for {self.symbol}/{timeframe}: {e}", exc_info=True)
-            # Depending on how you want unhandled errors to propagate, you might raise a specific error
-            # or allow DataOrchestrator's broader exception handling to catch it. Re-raising as PluginError is an option.
-            raise PluginError(f"Unexpected error in PluginSource for {self.symbol}/{timeframe}: {e}") from e
+    async def close(self):
+        """
+        Handles any cleanup for the PluginSource.
+        Currently, PluginSource does not own the plugin instance's lifecycle
+        (MarketService does), so this is a no-op.
+        """
+        logger.info(f"PluginSource '{self.source_id}' close method called (no-op). Plugin instance lifecycle managed by MarketService.")
+        pass

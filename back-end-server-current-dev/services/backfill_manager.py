@@ -2,435 +2,408 @@
 
 import asyncio
 import logging
-import time # Keep for int(time.time() * 1000)
-from datetime import datetime, timezone # Keep for datetime.fromtimestamp
+import time
+from datetime import datetime, timezone
 from typing import Dict, List, Optional, Tuple, Any
 
-from quart import current_app
+from quart import current_app # For accessing app.config
 from tenacity import retry, stop_after_attempt, wait_fixed, retry_if_exception_type, RetryError
-from prometheus_client import Counter, Gauge, REGISTRY
-from plugins.base import MarketPlugin, PluginError
+from prometheus_client import Counter, Gauge # Assuming REGISTRY check is handled globally or not needed here
+
+from plugins.base import MarketPlugin, PluginError, OHLCVBar, NetworkPluginError # Import OHLCVBar TypedDict
 from utils.db_utils import DatabaseError, fetch_query, insert_ohlcv_to_db, has_data_in_range
-from utils.timeframes import UNIT_MS # Used for calculating 'since_ms' in _run_historical_backfill
+from utils.timeframes import UNIT_MS, format_timestamp_to_iso # For period_ms calculation & logging
+# Removed: _parse_timeframe_str as backfill always deals with '1m' internally for UNIT_MS['m']
 
-# Assuming 'Cache' is an ABC or a class that might cause circular import if imported directly
-# from .cache_manager import Cache # If direct import is fine
-# If using forward reference in __init__, ensure typing.TYPE_CHECKING for actual import if needed for methods
+# Import CacheManagerABC for type hinting, though direct interaction might be through an instance
+from services.cache_manager import Cache as CacheManagerABC
 
-logger = logging.getLogger("BackfillManager")
+logger = logging.getLogger(__name__)
 
-# Global dictionaries for backfill tasks and locks, keyed by (market, provider, symbol)
+# Global dictionaries for managing active backfill tasks and their locks.
+# Keyed by Tuple[str, str, str]: (market, provider, symbol)
 _backfill_tasks: Dict[Tuple[str, str, str], asyncio.Task] = {}
 _backfill_locks: Dict[Tuple[str, str, str], asyncio.Lock] = {}
 
-# Optional Prometheus metrics
-try:
-    metric_name_chunks = "backfill_chunks_processed"
-    if metric_name_chunks not in REGISTRY._metrics_to_collectors:
-        BACKFILL_CHUNKS = Counter(
-            metric_name_chunks, "Number of backfill chunks processed", ["market", "provider", "symbol"]
-        )
-    else:
-        BACKFILL_CHUNKS = REGISTRY._metrics_to_collectors[metric_name_chunks]
-
-    metric_name_gap = "backfill_data_gap_ms"
-    if metric_name_gap not in REGISTRY._metrics_to_collectors:
-        BACKFILL_GAP = Gauge(
-            metric_name_gap, "Size of data gap in milliseconds", ["market", "provider", "symbol"]
-        )
-    else:
-        BACKFILL_GAP = REGISTRY._metrics_to_collectors[metric_name_gap]
-except (ImportError, AttributeError, ValueError, Exception) as e: # Broader catch for metric init
-    logger.warning(f"Failed to initialize Prometheus metrics for BackfillManager: {e}")
-    BACKFILL_CHUNKS = None
-    BACKFILL_GAP = None
+# Prometheus metrics
+# These would ideally be accessed from a central metrics registry configured at app startup
+# to avoid issues with re-registration upon module reload during development.
+# For example, they could be attributes of `current_app.prom_metrics` if set up that way.
+BACKFILL_CHUNKS_METRIC = getattr(current_app, "prom_metrics_backfill_chunks", None) if current_app else None
+BACKFILL_GAP_METRIC = getattr(current_app, "prom_metrics_backfill_gap", None) if current_app else None
 
 
 class BackfillManager:
     """
-    Manages historical data backfills for 1-minute OHLCV bars.
+    Manages historical data backfills for 1-minute OHLCV bars for a specific asset.
 
     This class is responsible for:
-    - Detecting if a data gap exists for a given market, provider, and symbol.
-    - Triggering background tasks to fetch missing historical data from a plugin.
-    - Handling data in chunks, storing it in the database, and potentially updating a cache.
-    - Using locks to prevent concurrent backfill operations for the same asset.
+    - Detecting if a data gap exists in the database for 1-minute data.
+    - Triggering and managing background asyncio Tasks to fetch missing historical
+      data from a provided `MarketPlugin` instance in manageable chunks.
+    - Storing the fetched 1-minute data into the database and the 1m cache.
+    - Using asyncio locks to prevent concurrent backfill operations for the same asset.
     - Implementing retry mechanisms for transient errors during data fetching.
+    - Respecting API limits and efficiently querying for missing data ranges.
+
+    An instance of BackfillManager is typically created for a specific market, provider,
+    and symbol, and is provided with a pre-configured plugin instance.
     """
+
+    _global_api_semaphore: Optional[asyncio.Semaphore] = None # Class-level semaphore
 
     def __init__(
         self,
         market: str,
         provider: str,
-        symbol: Optional[str], # Symbol can be None or empty at init, set later
-        plugin: MarketPlugin,
-        cache: Optional["Cache"],  # Forward reference for Cache type
+        symbol: str,
+        plugin: MarketPlugin, # Expects an already instantiated and configured plugin
+        cache: Optional[CacheManagerABC], # Shared CacheManager instance
     ):
         """
-        Initializes the BackfillManager.
+        Initializes the BackfillManager for a specific asset and plugin.
 
         Args:
-            market (str): The market identifier (e.g., "crypto").
-            provider (str): The data provider identifier (e.g., "binance").
-            symbol (Optional[str]): The trading symbol (e.g., "BTC/USD").
-                                    Can be initially None or empty and set later.
-            plugin (MarketPlugin): An instance of a market data plugin.
-            cache (Optional[Cache]): An instance of a cache manager (e.g., RedisCache).
+            market (str): The market identifier (e.g., 'crypto', 'stocks').
+            provider (str): The data provider identifier (e.g., 'binance', 'alpaca').
+                            This must match the provider_id the plugin instance is configured for.
+            symbol (str): The trading symbol (e.g., 'BTC/USDT', 'AAPL').
+            plugin (MarketPlugin): An instantiated `MarketPlugin` object, ready to be used
+                                   for fetching data for the specified provider.
+            cache (Optional[CacheManagerABC]): Cache manager instance for storing fetched 1m data.
+                                             Can be None if caching is not available/desired.
 
         Raises:
-            ValueError: If market or provider are not provided.
+            ValueError: If market, provider, symbol, or plugin are invalid,
+                        or if critical configuration values are missing or invalid.
         """
-        logger.debug(f"Initializing BackfillManager for {market}/{provider}, initial symbol: '{symbol}'")
-        if not market or not provider:
-            raise ValueError("BackfillManager: market and provider must be non-empty strings.")
-        
-        self.market = market
-        self.provider = provider
-        self.symbol = symbol or ""  # Ensure self.symbol is a string, even if empty
-        self.plugin = plugin
-        self.cache = cache # This is an instance of services.cache_manager.Cache (e.g. RedisCache)
+        if not all([market, provider, symbol]):
+            raise ValueError("BackfillManager: market, provider, and symbol must be non-empty strings.")
+        if not isinstance(plugin, MarketPlugin):
+            raise ValueError("BackfillManager: plugin must be an instance of MarketPlugin.")
+        if provider.lower() != plugin.provider_id.lower():
+            # Ensure the BackfillManager's provider context matches the plugin's configured provider_id
+            raise ValueError(
+                f"BackfillManager provider '{provider}' does not match "
+                f"plugin's configured provider_id '{plugin.provider_id}'."
+            )
 
-        # Load configurations
+        self.market: str = market
+        self.provider: str = provider # Matches plugin.provider_id
+        self.symbol: str = symbol
+        self.plugin: MarketPlugin = plugin
+        self.cache: Optional[CacheManagerABC] = cache
+        self.asset_key: Tuple[str, str, str] = (self.market, self.provider, self.symbol)
+
+        # Load configurations from current_app.config
         cfg = current_app.config
         try:
-            self.plugin_chunk_size = int(cfg.get("DEFAULT_PLUGIN_CHUNK_SIZE", 500))
-            self.max_backfill_chunks = int(cfg.get("MAX_BACKFILL_CHUNKS", 100))
-            self.backfill_chunk_delay_sec = float(cfg.get("BACKFILL_CHUNK_DELAY_SEC", 1.5))
-            self.default_backfill_period_ms = int(
-                cfg.get("DEFAULT_BACKFILL_PERIOD_MS", 30 * 24 * 60 * 60 * 1000)  # 30 days
-            )
-        except ValueError as ve:
-            logger.critical(f"Invalid configuration value for BackfillManager: {ve}", exc_info=True)
-            raise ValueError(f"Configuration error for BackfillManager: {ve}") from ve
+            self.default_plugin_fetch_limit_1m: int = int(cfg.get("DEFAULT_PLUGIN_CHUNK_SIZE", 500))
+            self.max_chunks_per_run: int = int(cfg.get("MAX_BACKFILL_CHUNKS_PER_RUN", 100))
+            self.chunk_fetch_delay_s: float = float(cfg.get("BACKFILL_CHUNK_DELAY_SEC", 1.5))
+            self.default_lookback_period_ms: int = int(cfg.get("DEFAULT_BACKFILL_PERIOD_MS", 30 * 24 * 60 * 60 * 1000)) # 30 days
 
-
-    async def trigger_historical_backfill_if_needed(self, timeframe_context: str) -> None:
-        """
-        Checks for historical data gaps and triggers a background backfill task if a gap is detected.
-        Ensures only one backfill task runs per asset (market, provider, symbol) at a time.
-
-        The `symbol` for this operation should be set on `self.symbol` before calling.
-
-        Args:
-            timeframe_context (str): The timeframe of the original request (used for logging context only).
-                                     Backfill is always performed for '1m' data.
-        Raises:
-            ValueError: If `self.symbol` is not set.
-        """
-        if not self.symbol:
-            logger.error(f"BackfillManager: Symbol not set for market={self.market}, provider={self.provider}. Cannot trigger backfill.")
-            raise ValueError("Symbol must be set on BackfillManager before triggering backfill.")
-        if not timeframe_context: # Though not used for logic, ensure it's provided for context
-            logger.warning("BackfillTrigger: timeframe_context is missing.")
-            # raise ValueError("Timeframe context must be non-empty for backfill trigger") # Or just log
-
-        asset_key = (self.market, self.provider, self.symbol)
-        active_task = _backfill_tasks.get(asset_key)
-
-        if active_task and not active_task.done():
-            logger.debug(f"Backfill task for {asset_key} is already running. Skipping trigger.")
-            return
-
-        target_oldest_ms = int(time.time() * 1000) - self.default_backfill_period_ms
-        logger.debug(f"Checking for backfill need for {asset_key}, target oldest: {datetime.fromtimestamp(target_oldest_ms/1000.0, tz=timezone.utc)}")
-
-        try:
-            gap_is_present = await self._is_historical_data_gap_present(target_oldest_ms)
+            if BackfillManager._global_api_semaphore is None:
+                 BackfillManager._global_api_semaphore = asyncio.Semaphore(
+                    int(cfg.get("BACKFILL_API_CONCURRENCY", 5))
+                 )
+            self._api_semaphore: asyncio.Semaphore = BackfillManager._global_api_semaphore
             
-            if gap_is_present:
-                lock = _backfill_locks.setdefault(asset_key, asyncio.Lock())
-                
-                if not lock.locked():
-                    async with lock:
-                        # Double-check task status after acquiring lock
-                        if _backfill_tasks.get(asset_key) and not _backfill_tasks[asset_key].done():
-                            logger.debug(f"Backfill for {asset_key} started by another coroutine while waiting for lock. Skipping.")
-                            return
+        except (ValueError, TypeError) as ve_cfg:
+            logger.critical(f"BackfillManager ({self.asset_key}): Invalid configuration value: {ve_cfg}", exc_info=True)
+            raise ValueError(f"Configuration error for BackfillManager: {ve_cfg}") from ve_cfg
+        except Exception as e_cfg_unexpected:
+            logger.critical(f"BackfillManager ({self.asset_key}): Unexpected error loading configuration: {e_cfg_unexpected}", exc_info=True)
+            raise RuntimeError(f"BackfillManager init failed due to config error: {e_cfg_unexpected}") from e_cfg_unexpected
 
-                        logger.info(f"BackfillTrigger: Gap detected. Starting backfill task for {asset_key} "
-                                    f"aiming for data up to {datetime.fromtimestamp(target_oldest_ms/1000.0, tz=timezone.utc)}.")
-                        task_name = f"Backfill_{self.provider}_{self.symbol}"
-                        _backfill_tasks[asset_key] = asyncio.create_task(
-                            self._run_historical_backfill(target_oldest_ms), name=task_name
-                        )
-                else:
-                    logger.debug(f"Backfill for {asset_key}: Lock is held, another trigger might be active or recently finished.")
-            else:
-                logger.debug(f"BackfillTrigger: No significant gap found for {asset_key}.")
-        except Exception as e: # Catch any exception from _is_historical_data_gap_present or lock logic
-            logger.error(f"Error during backfill trigger process for {asset_key}: {e}", exc_info=True)
+        logger.debug(f"BackfillManager initialized for {self.asset_key}.")
 
-
-    async def _is_historical_data_gap_present(self, target_oldest_ms: int) -> bool:
+    async def find_missing_1m_ranges(self, overall_since_ms: int, overall_until_ms: int) -> List[Tuple[int, int]]:
         """
-        Checks the database for the earliest 1m OHLCV bar for `self.symbol`
-        and determines if it's more recent than `target_oldest_ms`.
-
-        Args:
-            target_oldest_ms: Timestamp (ms UTC) to compare against. A gap exists if
-                              earliest data in DB is after this.
-
-        Returns:
-            True if a gap is detected (or no data found), False otherwise or on critical DB error.
-
-        Raises:
-            ValueError: If `self.symbol` is not set.
+        Identifies time ranges where 1-minute OHLCV data is missing in the database
+        for the manager's configured asset, within a given overall period.
         """
-        if not self.symbol:
-            logger.error(f"BackfillManager: Symbol not set for _is_historical_data_gap_present on {self.market}/{self.provider}.")
-            raise ValueError("Symbol required for gap check.") # Or return False if preferred
-
-        logger.debug(f"Gap check for {self.symbol}, target: {datetime.fromtimestamp(target_oldest_ms/1000.0, tz=timezone.utc)}")
-        earliest_db_ts_ms: Optional[int] = None
-        rows = [] # Ensure rows is defined for logging in case of early exit
+        log_prefix = f"FindMissingRanges ({self.asset_key}):"
+        # ... (rest of the method as provided previously) ...
+        logger.debug(f"{log_prefix} Checking for 1m gaps between {format_timestamp_to_iso(overall_since_ms)} and {format_timestamp_to_iso(overall_until_ms)}.")
+        effective_since_ms = max(0, overall_since_ms)
+        if effective_since_ms >= overall_until_ms:
+            logger.debug(f"{log_prefix} Invalid range: since ({effective_since_ms}) >= until ({overall_until_ms}). No gaps possible.")
+            return []
+        one_minute_ms = UNIT_MS['m']
+        query = """
+            SELECT timestamp FROM ohlcv_data
+            WHERE market = $1 AND provider = $2 AND symbol = $3 AND timeframe = '1m'
+              AND timestamp >= $4 AND timestamp < $5
+            ORDER BY timestamp ASC
+        """
+        since_dt = datetime.fromtimestamp(effective_since_ms / 1000.0, tz=timezone.utc)
+        until_dt = datetime.fromtimestamp(overall_until_ms / 1000.0, tz=timezone.utc)
         try:
+            db_records = await fetch_query(query, self.market, self.provider, self.symbol, since_dt, until_dt)
+        except DatabaseError as e_db:
+            logger.error(f"{log_prefix} DatabaseError querying existing 1m timestamps: {e_db}", exc_info=True)
+            return []
+        missing_ranges: List[Tuple[int, int]] = []
+        current_expected_ts_ms = effective_since_ms
+        for record in db_records:
+            bar_ts_ms = int(record["timestamp"].timestamp() * 1000)
+            if bar_ts_ms > current_expected_ts_ms:
+                missing_ranges.append((current_expected_ts_ms, bar_ts_ms))
+            current_expected_ts_ms = bar_ts_ms + one_minute_ms
+        if current_expected_ts_ms < overall_until_ms:
+            missing_ranges.append((current_expected_ts_ms, overall_until_ms))
+        if missing_ranges:
+            logger.info(f"{log_prefix} Found {len(missing_ranges)} missing 1m data ranges.")
+            for start_gap, end_gap in missing_ranges[:3]:
+                 logger.debug(f"{log_prefix} Gap: {format_timestamp_to_iso(start_gap)} to {format_timestamp_to_iso(end_gap)}")
+        else:
+            logger.debug(f"{log_prefix} No missing 1m data ranges found in the specified period.")
+        return sorted(missing_ranges)
+
+
+    async def trigger_historical_backfill_if_needed(self, timeframe_context: Optional[str] = None) -> None:
+        """
+        Checks if a historical data gap exists and triggers a background backfill task.
+        """
+        log_prefix = f"BackfillTrigger ({self.asset_key}, ContextTF: {timeframe_context or 'N/A'}):"
+        # ... (rest of the method as provided previously) ...
+        active_task = _backfill_tasks.get(self.asset_key)
+        if active_task and not active_task.done():
+            logger.debug(f"{log_prefix} Backfill task is already running. Skipping new trigger.")
+            return
+        now_ms = int(time.time() * 1000)
+        target_oldest_ms_for_gap_check = now_ms - self.default_lookback_period_ms
+        logger.debug(f"{log_prefix} Checking for backfill need. Target oldest data: {format_timestamp_to_iso(target_oldest_ms_for_gap_check)}.")
+        try:
+            gap_is_present = await self._is_historical_data_gap_present(target_oldest_ms_for_gap_check, now_ms)
+            if not gap_is_present:
+                logger.debug(f"{log_prefix} No significant historical data gap found. No backfill needed at this time.")
+                if BACKFILL_GAP_METRIC: BACKFILL_GAP_METRIC.labels(market=self.market, provider=self.provider, symbol=self.symbol).set(0)
+                return
+            lock = _backfill_locks.setdefault(self.asset_key, asyncio.Lock())
+            if lock.locked():
+                logger.debug(f"{log_prefix} Backfill lock is already held by another coroutine. Skipping trigger.")
+                return
+            async with lock:
+                if _backfill_tasks.get(self.asset_key) and not _backfill_tasks[self.asset_key].done():
+                    logger.debug(f"{log_prefix} Backfill was started by another coroutine while waiting for lock. Skipping.")
+                    return
+                logger.info(f"{log_prefix} Historical data gap detected. Starting background backfill task to cover up to {format_timestamp_to_iso(target_oldest_ms_for_gap_check)}.")
+                task_name = f"BackfillRun_{self.market}_{self.provider}_{self.symbol}"
+                _backfill_tasks[self.asset_key] = asyncio.create_task(
+                    self._run_historical_backfill(target_oldest_ms_for_gap_check, now_ms), name=task_name
+                )
+        except Exception as e_trigger:
+            logger.error(f"{log_prefix} Error during backfill trigger process: {e_trigger}", exc_info=True)
+
+
+    async def _is_historical_data_gap_present(self, target_oldest_ms: int, current_time_ms: int) -> bool:
+        """
+        Checks if a data gap exists by comparing the earliest existing 1m database timestamp
+        against the `target_oldest_ms`.
+        """
+        log_prefix = f"GapCheck ({self.asset_key}):"
+        # ... (rest of the method as provided previously) ...
+        logger.debug(f"{log_prefix} Target oldest for gap check: {format_timestamp_to_iso(target_oldest_ms)}.")
+        try:
+            if target_oldest_ms >= current_time_ms:
+                 logger.warning(f"{log_prefix} Target oldest {target_oldest_ms} is not before current time {current_time_ms}. Assuming no gap by this logic.")
+                 return False
+            data_exists_in_target_period = await has_data_in_range(
+                self.market, self.provider, self.symbol, "1m",
+                target_oldest_ms,
+                current_time_ms
+            )
+            if not data_exists_in_target_period:
+                logger.info(f"{log_prefix} No 1m data found at all between {format_timestamp_to_iso(target_oldest_ms)} and {format_timestamp_to_iso(current_time_ms)}. Gap detected.")
+                if BACKFILL_GAP_METRIC: BACKFILL_GAP_METRIC.labels(market=self.market, provider=self.provider, symbol=self.symbol).set(current_time_ms - target_oldest_ms)
+                return True
             rows = await fetch_query(
                 "SELECT MIN(timestamp) AS min_ts FROM ohlcv_data "
                 "WHERE market=$1 AND provider=$2 AND symbol=$3 AND timeframe='1m'",
                 self.market, self.provider, self.symbol
             )
-            if rows and rows[0] and rows[0].get('min_ts') is not None:
-                min_ts_from_db = rows[0]['min_ts']
-                if isinstance(min_ts_from_db, datetime):
-                    earliest_db_ts_ms = int(min_ts_from_db.timestamp() * 1000)
-                    logger.debug(f"Earliest 1m data in DB for {self.symbol}: {min_ts_from_db.replace(tzinfo=timezone.utc)}")
-                else: # Should not happen if DB schema is correct
-                    logger.warning(f"Unexpected type for min_ts for {self.symbol}: {type(min_ts_from_db)}. Assuming gap.")
-                    return True 
-            else: # No 1m data found in DB for this symbol
-                logger.info(f"No 1m data found in DB for {self.symbol}. Gap detected.")
+            if rows and rows[0] and rows[0]['min_ts'] is not None:
+                earliest_db_ts_dt = rows[0]['min_ts']
+                if isinstance(earliest_db_ts_dt, datetime):
+                    earliest_db_ts_ms = int(earliest_db_ts_dt.timestamp() * 1000)
+                    logger.debug(f"{log_prefix} Earliest 1m data in DB for {self.symbol}: {format_timestamp_to_iso(earliest_db_ts_ms)}.")
+                    buffer_ms = 5 * UNIT_MS['m'] 
+                    gap_detected = earliest_db_ts_ms > (target_oldest_ms + buffer_ms)
+                    if BACKFILL_GAP_METRIC: BACKFILL_GAP_METRIC.labels(market=self.market, provider=self.provider, symbol=self.symbol).set(earliest_db_ts_ms - target_oldest_ms if gap_detected else 0)
+                    if gap_detected:
+                        logger.info(f"{log_prefix} Gap detected. Earliest DB data ({format_timestamp_to_iso(earliest_db_ts_ms)}) is after target ({format_timestamp_to_iso(target_oldest_ms)} + buffer).")
+                    return gap_detected
+                else:
+                    logger.warning(f"{log_prefix} Unexpected type for min_ts: {type(earliest_db_ts_dt)}. Assuming gap.")
+                    return True
+            else:
+                logger.info(f"{log_prefix} No 1m data found at all in DB for {self.symbol}. Full historical gap.")
+                if BACKFILL_GAP_METRIC: BACKFILL_GAP_METRIC.labels(market=self.market, provider=self.provider, symbol=self.symbol).set(current_time_ms - target_oldest_ms)
                 return True
-        except DatabaseError as dbe: # Custom DB error from db_utils
-            logger.error(f"DB error during gap check for {self.symbol}: {dbe}", exc_info=True)
-            return False # On DB error, assume no gap to prevent repeated failed attempts
-        except (IndexError, KeyError, TypeError, AttributeError, ValueError) as e_data:
-            logger.error(f"Data processing error during gap check for {self.symbol}: {e_data}. Raw rows: {rows}", exc_info=True)
-            return False # Problem interpreting DB result, assume no gap
-        except Exception as e: # Fallback
-            logger.error(f"Unexpected error during gap check for {self.symbol}: {e}", exc_info=True)
+        except DatabaseError as dbe:
+            logger.error(f"{log_prefix} DB error during gap check: {dbe}", exc_info=True)
             return False
+        except Exception as e_check:
+            logger.error(f"{log_prefix} Unexpected error during gap check: {e_check}", exc_info=True)
+            return False
+        return False
 
-        if earliest_db_ts_ms is None: # Should be caught by the "no data" case above, but as a safeguard
-             logger.info(f"Could not determine earliest DB timestamp for {self.symbol}. Assuming gap.")
-             return True
-
-        gap_exists = earliest_db_ts_ms > (target_oldest_ms + UNIT_MS['d']) # Add a day buffer for significance
-        if gap_exists and BACKFILL_GAP:
-            BACKFILL_GAP.labels(market=self.market, provider=self.provider, symbol=self.symbol).set(
-                earliest_db_ts_ms - target_oldest_ms
-            )
-        elif not gap_exists and BACKFILL_GAP: # Reset gauge if no gap
-            BACKFILL_GAP.labels(market=self.market, provider=self.provider, symbol=self.symbol).set(0)
-            
-        return gap_exists
-
-
-    async def _run_historical_backfill(self, target_oldest_ms: int) -> None:
+    async def _run_historical_backfill(self, overall_target_oldest_ms: int, current_time_ms: int) -> None:
         """
         Performs the historical data backfill for `self.symbol`.
-
-        Runs as an asyncio Task, fetching 1-minute OHLCV data in chunks
-        from the plugin, going backwards in time until `target_oldest_ms` is reached,
-        the plugin provides no more data, or max chunks are processed.
-        Data is inserted into DB and optionally cache.
-
-        Args:
-            target_oldest_ms: The oldest timestamp (ms UTC) to backfill to.
-        
-        Raises:
-            ValueError: If `self.symbol` is not set when the method is called.
         """
-        if not self.symbol:
-            logger.error(f"BackfillManager: Symbol not set at start of _run_historical_backfill for {self.market}/{self.provider}. Aborting task.")
-            # This state should ideally be prevented by the caller (DataOrchestrator)
-            return
+        log_prefix = f"RunBackfill ({self.asset_key}):"
+        logger.info(f"{log_prefix} Starting backfill run. Overall target oldest: {format_timestamp_to_iso(overall_target_oldest_ms)}.")
 
-        asset_key = (self.market, self.provider, self.symbol)
-        logger.info(f"Running backfill for {asset_key}, target oldest: {datetime.fromtimestamp(target_oldest_ms/1000.0, tz=timezone.utc)}.")
-        
-        current_earliest_ms: int
-        chunk_num_completed = -1 # To correctly log number of attempted chunks
+        try:
+            all_identified_gaps = await self.find_missing_1m_ranges(overall_target_oldest_ms, current_time_ms)
+            all_identified_gaps.sort(key=lambda r: r[0], reverse=True) 
 
-        try: # Outermost try for the entire backfill operation
-            try: # Nested try for initial DB query
-                rows = await fetch_query(
-                    "SELECT MIN(timestamp) AS min_ts FROM ohlcv_data "
-                    "WHERE market=$1 AND provider=$2 AND symbol=$3 AND timeframe='1m'",
-                    self.market, self.provider, self.symbol
-                )
-                if rows and rows[0] and rows[0].get('min_ts') and isinstance(rows[0]['min_ts'], datetime):
-                    current_earliest_ms = int(rows[0]['min_ts'].timestamp() * 1000)
-                    logger.info(f"Backfill {asset_key}: Starting from DB earliest: {datetime.fromtimestamp(current_earliest_ms/1000.0, tz=timezone.utc)}")
-                else:
-                    current_earliest_ms = int(time.time() * 1000)
-                    logger.info(f"Backfill {asset_key}: No 1m data in DB, starting from current time: {datetime.fromtimestamp(current_earliest_ms/1000.0, tz=timezone.utc)}")
-            except DatabaseError as dbe:
-                logger.error(f"Backfill {asset_key}: DB error on initial MIN(timestamp) fetch: {dbe}. Aborting backfill.", exc_info=True)
-                return
-            except (IndexError, KeyError, TypeError, AttributeError, ValueError) as e_conv:
-                logger.error(f"Backfill {asset_key}: Error processing initial MIN(timestamp) from DB: {e_conv}. Aborting backfill.", exc_info=True)
+            if not all_identified_gaps:
+                logger.info(f"{log_prefix} No missing 1m ranges found. Backfill complete or unnecessary.")
                 return
 
-            for i in range(self.max_backfill_chunks):
-                chunk_num_completed = i
-                if current_earliest_ms <= target_oldest_ms:
-                    logger.info(f"Backfill {asset_key}: Reached target oldest timestamp.")
-                    break
+            plugin_1m_fetch_limit = await self.plugin.get_fetch_ohlcv_limit()
+            if plugin_1m_fetch_limit <= 0 : plugin_1m_fetch_limit = self.default_plugin_fetch_limit_1m
 
-                # Calculate 'since' for plugin: fetch a chunk ending *before* current_earliest_ms
-                since_for_plugin_chunk = current_earliest_ms - (self.plugin_chunk_size * UNIT_MS['m'])
-                
-                fetched_bars = await self._process_backfill_chunk(
-                    asset_key, chunk_num_completed, since_for_plugin_chunk, 
-                    current_earliest_ms, target_oldest_ms
-                )
+            total_chunks_this_run = 0
+            total_bars_inserted_this_run = 0
+            one_minute_ms = UNIT_MS['m']
 
-                if not fetched_bars: # _process_backfill_chunk returns empty if no new older bars or plugin error limit reached
-                    logger.info(f"Backfill {asset_key}: Chunk {chunk_num_completed + 1} yielded no new older bars. Ending backfill.")
+            for gap_start_ms, gap_end_ms in all_identified_gaps:
+                if total_chunks_this_run >= self.max_chunks_per_run:
+                    logger.info(f"{log_prefix} Reached max_chunks_per_run. Will continue later if gaps remain.")
                     break
                 
-                current_earliest_ms = fetched_bars[0]["timestamp"] # new_older_bars is sorted, [0] is earliest
-                logger.info(
-                    f"Backfill {asset_key}: Stored {len(fetched_bars)} new bars. "
-                    f"New earliest is {datetime.fromtimestamp(current_earliest_ms/1000.0, tz=timezone.utc)}."
-                )
-                if BACKFILL_CHUNKS:
-                    BACKFILL_CHUNKS.labels(market=self.market, provider=self.provider, symbol=self.symbol).inc()
-                
-                try:
-                    await asyncio.sleep(self.backfill_chunk_delay_sec)
-                except asyncio.CancelledError:
-                    logger.info(f"Backfill {asset_key} cancelled during inter-chunk sleep.")
-                    raise # Propagate cancellation
+                logger.info(f"{log_prefix} Processing gap: {format_timestamp_to_iso(gap_start_ms)} to {format_timestamp_to_iso(gap_end_ms)}.")
+                current_chunk_effective_until_ms = gap_end_ms
 
-            logger.info(f"Backfill for {asset_key} finished main loop after {chunk_num_completed + 1} chunk(s).")
+                while current_chunk_effective_until_ms > gap_start_ms and total_chunks_this_run < self.max_chunks_per_run:
+                    chunk_fetch_since_ms = current_chunk_effective_until_ms - (plugin_1m_fetch_limit * one_minute_ms)
+                    chunk_fetch_since_ms = max(chunk_fetch_since_ms, gap_start_ms, overall_target_oldest_ms)
+                    
+                    if chunk_fetch_since_ms >= current_chunk_effective_until_ms:
+                        break 
+                    
+                    num_bars_in_chunk_range = (current_chunk_effective_until_ms - chunk_fetch_since_ms) // one_minute_ms
+                    limit_for_api_call = min(plugin_1m_fetch_limit, max(1, num_bars_in_chunk_range))
+
+                    if limit_for_api_call == 0: break
+
+                    params_for_plugin = {'until_ms': current_chunk_effective_until_ms} 
+
+                    fetched_bars_in_chunk: List[OHLCVBar] = []
+                    async with self._api_semaphore:
+                        try: # REMOVED THE EXTRA { HERE
+                            fetched_bars_in_chunk = await self._process_backfill_chunk(
+                                chunk_num_idx=total_chunks_this_run,
+                                since_ms_for_plugin=chunk_fetch_since_ms,
+                                limit_for_plugin=limit_for_api_call,
+                                params_for_plugin=params_for_plugin
+                            )
+                        except RetryError as e_retry: 
+                            logger.error(f"{log_prefix} Chunk fetch failed after all retries for range ending {format_timestamp_to_iso(current_chunk_effective_until_ms)}: {e_retry}", exc_info=True)
+                            break 
+                        except PluginError as e_plugin: 
+                            logger.error(f"{log_prefix} Non-retriable PluginError processing chunk for range ending {format_timestamp_to_iso(current_chunk_effective_until_ms)}: {e_plugin}", exc_info=True)
+                            break
+                        except Exception as e_chunk_proc:
+                             logger.error(f"{log_prefix} Unexpected error in _process_backfill_chunk: {e_chunk_proc}", exc_info=True)
+                             break
+                    
+                    total_chunks_this_run += 1
+                    if fetched_bars_in_chunk:
+                        total_bars_inserted_this_run += len(fetched_bars_in_chunk)
+                        current_chunk_effective_until_ms = fetched_bars_in_chunk[0]['timestamp'] 
+                    else: 
+                        logger.debug(f"{log_prefix} Chunk yielded no new older bars for range ending {format_timestamp_to_iso(current_chunk_effective_until_ms)}. Assuming end of data for this segment.")
+                        break 
+                    
+                    await asyncio.sleep(self.chunk_fetch_delay_s)
+
+            logger.info(f"{log_prefix} Backfill run segment finished. Total chunks: {total_chunks_this_run}. Total bars inserted: {total_bars_inserted_this_run}.")
 
         except asyncio.CancelledError:
-            logger.info(f"Backfill task for {asset_key} was cancelled.")
-        except Exception as e: # Catch-all for unexpected errors in the main backfill logic
-            logger.error(f"Critical unhandled error in backfill process for {asset_key}: {e}", exc_info=True)
+            logger.info(f"{log_prefix} Backfill task was cancelled.")
+            raise
+        except Exception as e_run_main:
+            logger.error(f"{log_prefix} Critical unhandled error in backfill process: {e_run_main}", exc_info=True)
         finally:
-            _backfill_tasks.pop(asset_key, None)
-            lock = _backfill_locks.get(asset_key)
+            _backfill_tasks.pop(self.asset_key, None)
+            lock = _backfill_locks.get(self.asset_key)
             if lock and lock.locked():
                 try:
                     lock.release()
-                except RuntimeError as rle_lock:
-                    logger.warning(f"Backfill {asset_key}: Error releasing lock (already unlocked or other issue): {rle_lock}")
-            logger.info(f"Backfill task for {asset_key} fully cleaned up.")
+                    logger.debug(f"{log_prefix} Lock released.")
+                except RuntimeError: 
+                    logger.warning(f"{log_prefix} Attempted to release an already unlocked lock.")
+            logger.info(f"{log_prefix} Backfill task fully cleaned up.")
 
     @retry(
-        stop=stop_after_attempt(3), # Total 3 attempts for this chunk processing
-        wait=wait_fixed(2),      # Wait 2 seconds between retries
-        retry=retry_if_exception_type(PluginError), # Only retry on PluginError
-        after=lambda rs: logger.warning(
-            f"Backfill chunk for {rs.args[1] if len(rs.args) > 1 else 'unknown_asset'}: " # rs.args[1] is asset_key
-            f"Retry attempt {rs.attempt_number} failed due to {rs.outcome.exception()}. "
-            f"Next attempt in {rs.future.result() if rs.future else 'N/A'}s."
+        stop=stop_after_attempt(3),
+        wait=wait_fixed(2), 
+        retry=retry_if_exception_type(NetworkPluginError),
+        after=lambda retry_state: logger.warning(
+            f"BackfillChunk ({getattr(retry_state.args[0], 'asset_key', 'UnknownAsset')} "  # Access self via args[0]
+            f"Attempt {retry_state.attempt_number}/{retry_state.attempt_number + retry_state.retry_object.stop.max_attempt_number -1}): "
+            f"Failed due to {type(retry_state.outcome.exception()).__name__}. "
+            f"Next attempt in {retry_state.next_wait_time:.2f}s." if retry_state.next_wait_time is not None else "No more retries."
         ),
-        reraise=True # Re-raise the exception after max attempts
+        reraise=True
     )
     async def _process_backfill_chunk(
         self,
-        asset_key: Tuple[str, str, str],
-        chunk_num_idx: int, # 0-indexed chunk number
+        chunk_num_idx: int, 
         since_ms_for_plugin: int,
-        current_db_earliest_ms: int,
-        target_overall_oldest_ms: int,
-    ) -> List[Dict[str, Any]]:
+        limit_for_plugin: int,
+        params_for_plugin: Optional[Dict[str, Any]] = None
+    ) -> List[OHLCVBar]:
         """
-        Processes a single chunk of historical data for backfill.
-
-        Fetches data from the plugin, filters for new older bars, stores them in DB and cache.
-        This method is decorated with `tenacity.retry` to handle transient PluginErrors.
-
-        Args:
-            asset_key: Identifier (market, provider, symbol).
-            chunk_num_idx: The current chunk number (0-indexed, for logging).
-            since_ms_for_plugin: The 'since' timestamp to pass to the plugin.
-            current_db_earliest_ms: The earliest timestamp currently known in the database.
-            target_overall_oldest_ms: The ultimate oldest timestamp the backfill aims for.
-
-        Returns:
-            A list of newly fetched and stored older bars, sorted chronologically.
-            Returns an empty list if no new relevant bars are found or if a non-retriable error occurs.
-        
-        Raises:
-            PluginError: If plugin fetching fails after all retries.
-            DatabaseError: If storing data in the database fails.
-            asyncio.CancelledError: If the task is cancelled.
+        Processes a single chunk of historical 1m data for backfill.
         """
-        if not self.symbol: # Should be set by _run_historical_backfill
-             logger.error(f"BackfillManager._process_backfill_chunk: Symbol not set for {asset_key}. Aborting chunk.")
-             raise ValueError("Symbol required for processing backfill chunk.")
-
+        log_prefix = f"ProcessChunk ({self.asset_key}, Chunk {chunk_num_idx + 1}):"
+        # ... (rest of the method as provided previously, ensure format_timestamp_to_iso is imported/available) ...
         logger.debug(
-            f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: Fetching 1m since "
-            f"{datetime.fromtimestamp(since_ms_for_plugin/1000.0, tz=timezone.utc)}, limit {self.plugin_chunk_size}"
+            f"{log_prefix} Fetching 1m bars. Since: {format_timestamp_to_iso(since_ms_for_plugin)}, "
+            f"Limit: {limit_for_plugin}, Params: {params_for_plugin}."
         )
-
-        # Check for existing data in the specific narrow range to avoid re-fetching already stored data.
-        # This range is from where the plugin *might* start returning data up to our current earliest.
-        try:
-            if await has_data_in_range(
-                self.market, self.provider, self.symbol, "1m", 
-                since_ms_for_plugin, # From the start of the plugin's fetch window
-                current_db_earliest_ms # Up to what we currently have
-            ):
-                logger.debug(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: Data already exists in target sub-range. "
-                             "This might indicate overlapping fetch or very recent fill. Skipping this specific plugin fetch for safety.")
-                # This could happen if a previous chunk slightly over-fetched or if another process is also backfilling.
-                # Returning empty here prevents re-fetching/re-inserting the same very recent data.
-                return [] 
-        except DatabaseError as dbe_check:
-            logger.warning(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: DB error checking for existing data in range: {dbe_check}. Proceeding with fetch.", exc_info=True)
-        except ValueError as ve_check: # From has_data_in_range timestamp validation
-            logger.warning(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: Value error checking data range: {ve_check}. Proceeding cautiously.", exc_info=True)
-
-
-        # Fetch from plugin (this call is retried by tenacity on PluginError)
-        bars_from_plugin = await self.plugin.fetch_historical_ohlcv(
-            provider=self.provider, symbol=self.symbol, timeframe="1m",
-            since=since_ms_for_plugin, limit=self.plugin_chunk_size,
+        bars_from_plugin: List[OHLCVBar] = await self.plugin.fetch_historical_ohlcv(
+            symbol=self.symbol,
+            timeframe="1m",
+            since=since_ms_for_plugin,
+            limit=limit_for_plugin,
+            params=params_for_plugin
         )
-
         if not bars_from_plugin:
-            logger.info(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: Plugin returned no data.")
+            logger.info(f"{log_prefix} Plugin returned no data for the requested range.")
             return []
-
-        # Filter for bars that are genuinely older than our current DB earliest AND within the overall target range
-        new_older_bars = [
-            b for b in bars_from_plugin
-            if isinstance(b, dict) and \
-               isinstance(b.get('timestamp'), int) and \
-               b['timestamp'] < current_db_earliest_ms and \
-               b['timestamp'] >= target_overall_oldest_ms
-        ]
-
-        if not new_older_bars:
-            logger.info(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: No new *relevant older* bars found "
-                        f"(plugin returned {len(bars_from_plugin)} total bars).")
-            # Check if plugin is returning data newer than what we're looking for; might signal end of useful history.
-            if any(b.get('timestamp', float('inf')) >= current_db_earliest_ms for b in bars_from_plugin if isinstance(b, dict)):
-                logger.warning(f"Backfill {asset_key}: Plugin returned bars newer than or same as current DB earliest in chunk. "
-                               "Considered end of useful history from plugin for this pass.")
-            return [] # No new older bars to process
-
-        new_older_bars.sort(key=lambda b_sort: b_sort['timestamp'])
-        
+        bars_from_plugin.sort(key=lambda b: b['timestamp'])
+        newly_fetched_bars = bars_from_plugin
+        if not newly_fetched_bars:
+            logger.info(f"{log_prefix} No new relevant older bars after filtering (Plugin returned {len(bars_from_plugin)} total).")
+            return []
+        dict_bars_to_store = [dict(b) for b in newly_fetched_bars]
         try:
-            await insert_ohlcv_to_db(self.market, self.provider, self.symbol, "1m", new_older_bars)
-            if self.cache and hasattr(self.cache, 'store_1m_bars'): # Check if cache and method exist
-                # Fire-and-forget task for cache update
-                asyncio.create_task(self.cache.store_1m_bars(self.market, self.provider, self.symbol, new_older_bars))
-                logger.debug(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: Submitted {len(new_older_bars)} bars to cache.")
+            asyncio.create_task(
+                insert_ohlcv_to_db(self.market, self.provider, self.symbol, "1m", dict_bars_to_store),
+                name=f"BackfillDBInsert_{self.symbol}_Chunk{chunk_num_idx}"
+            )
+            logger.debug(f"{log_prefix} DB insert task created for {len(newly_fetched_bars)} bars.")
+            if self.cache and hasattr(self.cache, 'store_1m_bars'):
+                asyncio.create_task(
+                    self.cache.store_1m_bars(self.market, self.provider, self.symbol, dict_bars_to_store),
+                    name=f"BackfillCacheStore_{self.symbol}_Chunk{chunk_num_idx}"
+                )
+                logger.debug(f"{log_prefix} 1m Cache store task created for {len(newly_fetched_bars)} bars.")
         except DatabaseError as dbe_insert:
-            logger.error(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: DB error inserting {len(new_older_bars)} bars: {dbe_insert}. "
-                         "This chunk will be considered failed.", exc_info=True)
-            raise # Re-raise to be potentially caught by an outer loop or task handler if needed, but will stop this backfill run.
-        except Exception as e_store: # Catch other unexpected errors during storage
-            logger.error(f"Backfill chunk {chunk_num_idx + 1} for {asset_key}: Unexpected error storing {len(new_older_bars)} bars: {e_store}. "
-                         "This chunk will be considered failed.", exc_info=True)
-            raise # Re-raise
-
-        return new_older_bars
+            logger.error(f"{log_prefix} DB error during scheduling insert for {len(newly_fetched_bars)} bars: {dbe_insert}", exc_info=True)
+            raise 
+        except Exception as e_store_task: 
+            logger.error(f"{log_prefix} Error scheduling storage tasks for {len(newly_fetched_bars)} bars: {e_store_task}", exc_info=True)
+            raise PluginError(message=f"Failed to schedule storage tasks: {e_store_task}", provider_id=self.provider, original_exception=e_store_task) from e_store_task
+        if BACKFILL_CHUNKS_METRIC: # Check if metric object exists
+            BACKFILL_CHUNKS_METRIC.labels(market=self.market, provider=self.provider, symbol=self.symbol).inc()
+        logger.info(f"{log_prefix} Successfully processed and scheduled storage for {len(newly_fetched_bars)} bars.")
+        return newly_fetched_bars

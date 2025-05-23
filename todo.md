@@ -1,135 +1,129 @@
+# Server Codebase TODO
+
 This document lists tasks to improve the server codebase, focusing on performance, scalability, maintainability, and robustness. Tasks are categorized and prioritized based on impact and complexity.
 
-Implement Redis Pub/Sub for WebSocket Broadcasting (Priority: High)
-Description: Replace the single Queue per subscription key in SubscriptionManager with a Redis Pub/Sub model to scale broadcasting across multiple server instances and reduce bottlenecks for high subscriber counts.
-Action: Use Redis channels for each subscription key (market/provider/symbol/timeframe). Publish updates to channels and have each server instance subscribe to relevant channels. Update _broadcaster_loop to read from Redis instead of a local queue.
-Impact: Enables horizontal scaling and reduces latency for large numbers of WebSocket clients.
+## High Priority
 
-Track Per-Client State in SubscriptionManager (Priority: Medium)
-Description: Avoid fetching data for clients already up-to-date by tracking each client's last_received_ts in SubscriptionManager. This prevents unnecessary API calls when clients have different client_since values.
-Action: Add a dictionary in SubscriptionManager to store per-client state (e.g., client_ws_key -> last_received_ts). Modify _poll_loop to fetch data only for clients needing updates.
-Impact: Reduces redundant data fetches, improving performance under mixed client scenarios.
+* **Implement Redis Pub/Sub for WebSocket Broadcasting**
+    * **Status**: Not Done
+    * **Description**: Replace direct WebSocket queueing with Redis Pub/Sub for scalable broadcasting.
+    * **Action**: Modify `SubscriptionService`/`BroadcastManager` to use Redis Pub/Sub channels. Workers publish to Redis; broadcasters subscribe.
+    * **Impact**: Horizontal scaling, reduced broadcasting latency.
+* **Parallelize Backfill Chunks for a Single Asset**
+    * **Status**: Partially Addressed (global semaphore exists, but per-asset chunk/gap parallelism can be improved).
+    * **Description**: Speed up historical backfills for a single asset by fetching its missing chunks/gaps in parallel, respecting API limits.
+    * **Action**: Modify `BackfillManager._run_historical_backfill` to use `asyncio.gather` for fetching multiple chunks/gaps of *the same asset* concurrently, coordinated by its instance or a finer-grained semaphore if the global one isn't sufficient.
+    * **Impact**: Significantly reduces backfill time for individual assets.
+* **Develop Unit Tests**
+    * **Status**: Not Done
+    * **Description**: Create unit tests for core components.
+    * **Action**: Use pytest/pytest-asyncio, mock external dependencies. Cover `MarketService`, `DataOrchestrator`, Plugins, `SubscriptionService`, `CacheManager`, `BackfillManager`.
+    * **Impact**: Code reliability, safe refactoring.
+* **Create Integration Tests**
+    * **Status**: Not Done
+    * **Description**: Validate end-to-end behavior.
+    * **Action**: Test environment with Quart test client, WebSocket test client, mock plugins/DB. Test subscription lifecycle, API calls, error handling.
+    * **Impact**: System-level correctness.
+* **Implement Finer-Grained Caching for 1m Bars**
+    * **Status**: Not Done
+    * **Description**: Cache 1m bars in smaller time buckets (e.g., hourly/daily) in `RedisCache` instead of one large list per symbol.
+    * **Action**: Update `RedisCache.store_1m_bars` and `get_1m_bars` to use time-bucketed keys.
+    * **Impact**: Improves cache hit rates for 1m data, reduces Redis memory for very long series if only partial data is needed.
 
-Caching Optimizations
-Implement Finer-Grained Caching (Priority: High)
-Description: Cache 1m bars in smaller buckets (e.g., per-minute or 5-minute) instead of hourly buckets to improve cache hit rates for small time ranges. This reduces database queries for partial cache hits.
-Action: Update _cache_1m_bars_grouped and _get_cached_1m_bars_grouped to use smaller time buckets. Adjust cache key format to include bucket start times (e.g., 1m_bars_5min:market:provider:symbol:ts).
-Impact: Increases cache efficiency, reducing database load.
+## Medium Priority
 
-Use Redis Pipelines for Batch Operations (Priority: Medium)
-Description: Optimize cache operations in _cache_1m_bars_grouped by using Redis pipelines or batch commands to reduce network round-trips when setting multiple keys.
-Action: Modify Cache class to support pipelined operations using redis.asyncio's pipeline API. Update _cache_1m_bars_grouped to batch set calls within a pipeline.
-Impact: Improves caching performance, especially during backfills or high write loads.
+* **Market-Specific Symbol Filtering in Plugins (NEW TASK)**
+    * **Status**: Not Done
+    * **Description**: Modify `MarketPlugin`'s `get_symbols` method and its implementations (especially for plugins serving multiple asset classes under one provider like `AlpacaPlugin`) to accept a `market` (asset class) parameter. This will allow fetching and displaying symbols relevant only to the user-selected market/asset class.
+    * **Action**:
+        1.  Update `MarketPlugin.get_symbols` signature in `plugins/base.py` to accept `market: str`.
+        2.  Update `MarketService.get_symbols` to pass the `market` argument it receives to `plugin_instance.get_symbols(market=market)`.
+        3.  Modify `AlpacaPlugin.get_symbols` (and other relevant plugins) to use the `market` argument to filter symbols, e.g., by setting the `asset_class` parameter in API calls.
+        4.  Ensure `AlpacaPlugin.supported_markets` accurately reflects all distinct, filterable asset classes it provides.
+    * **Impact**: Correctly filters symbols for multi-asset class providers, improving UX and relevance of data. Essential for supporting diverse asset types from a single provider like Alpaca.
+* **Add Backend API Endpoint for Listing All Markets (NEW TASK - related to frontend)**
+    * **Status**: Not Done
+    * **Description**: Create a new API endpoint (e.g., `/api/markets`) that returns the list of all available markets discovered by `PluginLoader`.
+    * **Action**: Add a route in `blueprints/market.py` that calls `PluginLoader.get_all_markets()` and returns the result as JSON. Update frontend to use this endpoint for the market dropdown.
+    * **Impact**: Decouples frontend market list from hardcoding, makes it dynamic based on backend capabilities.
+* **Refine `RedisCache` Serialization for `None`/`NaN`/`Infinity`**
+    * **Status**: Not Done (Still converts to `0.0`)
+    * **Description**: `RedisCache._serialize_bars` converts `None`, `NaN`, `Infinity` to `0.0`. This can lead to loss of distinct meaning.
+    * **Action**: Modify `_serialize_bars` to serialize `None` as `null`. Handle `NaN`/`Infinity` as strings (e.g., "NaN", "Infinity") or by omitting them if `null` isn't appropriate, ensuring downstream consumers and DB can handle this.
+    * **Impact**: Improves data fidelity in cache.
+* **Centralize Bar Filtering Logic**
+    * **Status**: Not Done
+    * **Description**: Similar filtering logic (`since`, `before`, `limit`) exists in `CacheSource._filter_bars` and `DataOrchestrator._apply_filters`.
+    * **Action**: Create a common utility function for this filtering logic and use it in both places.
+    * **Impact**: Reduces redundancy, improves maintainability.
+* **Use Redis Pipelines for Batch Cache Operations**
+    * **Status**: Not Done
+    * **Description**: Optimize multiple Redis writes in `RedisCache` by using pipelines.
+    * **Action**: Modify `RedisCache` methods that perform multiple `setex` or other commands in a loop to use `redis.asyncio.pipeline()`.
+    * **Impact**: Improves caching performance, especially for bulk updates.
+* **Add Manual Refresh for Continuous Aggregates**
+    * **Status**: Not Done
+    * **Description**: Implement a way to manually refresh TimescaleDB continuous aggregates.
+    * **Action**: Add an admin endpoint or scheduled task to call `CALL refresh_continuous_aggregate(...)`.
+    * **Impact**: Data integrity for higher timeframes.
+* **Prioritize Real-Time Subscriptions Over Backfill**
+    * **Status**: Not Done
+    * **Description**: Mechanism to pause/throttle backfills during high load.
+    * **Action**: Implement load monitoring in `MarketService` or a global task manager; allow `BackfillManager` tasks to be paused/resumed or their `_api_semaphore` adjusted dynamically.
+    * **Impact**: Ensures low latency for real-time clients.
+* **Centralize Validation with Pydantic**
+    * **Status**: Not Done
+    * **Description**: Use Pydantic for request/response schema validation in blueprints.
+    * **Action**: Define Pydantic models, integrate with Quart routes.
+    * **Impact**: Simplifies maintenance, consistent validation.
+* **Expand Prometheus Metrics**
+    * **Status**: Partially Addressed (Cache and Backfill have some; DataOrchestrator needs its restored/enhanced).
+    * **Description**: Add/restore metrics for `DataOrchestrator` operations (latency, source usage), WebSocket connections, subscription rates.
+    * **Action**: Integrate `prometheus_client` further into `DataOrchestrator` and `SubscriptionService`.
+    * **Impact**: Enhanced monitoring.
+* **Profile Database Queries**
+    * **Status**: Not Done (Process)
+    * **Description**: Identify and optimize slow DB queries.
+    * **Action**: Use `EXPLAIN ANALYZE`.
+    * **Impact**: Reduces latency, DB contention.
+* **Correct `DEFAULT_BACKFILL_PERIOD_MS` Comment/Value in `config.py`**
+    * **Status**: Not Done
+    * **Description**: The comment says "~10 years" but the default value is `315576000000 * 10` (100 years).
+    * **Action**: Align the comment and the default value in `config.py` to the intended duration.
+    * **Impact**: Configuration clarity.
+* **Track Per-Client State in SubscriptionService (Refined)**
+    * **Status**: Partially Addressed.
+    * **Description**: Enhance `SubscriptionService` to better handle scenarios where multiple clients connected to the *same subscription key* might require different catch-up data streams after their initial connection, if this is a desired feature beyond the initial `clientSince`.
+    * **Action**: Evaluate if the current model (initial `clientSince` + shared live stream per key) is sufficient. If not, investigate options for more granular per-websocket client catch-up mechanisms or state tracking within `SubscriptionService` or `SubscriptionWorker`.
+    * **Impact**: Potentially reduces redundant data transmission if clients on the same key have very different states.
 
-Reduce Cache Fragmentation for OHLCV Results (Priority: Medium)
-Description: Cache keys in fetch_ohlcv include since, before, and limit, leading to fragmentation. Cache individual bars or smaller ranges to improve hit rates across similar requests.
-Action: Cache OHLCV results in smaller chunks (e.g., per day or per 100 bars) and reconstruct responses from these chunks. Update fetch_ohlcv to check for partial cache hits.
-Impact: Increases cache reuse, reducing redundant data fetches.
+## Low Priority
 
-Database Optimizations
-Optimize Database Queries (Priority: Medium)
-Description: Reduce I/O in fetch_ohlcv_from_db by selecting only needed columns (timestamp, open, high, low, close, volume) instead of all columns.
-Action: Update fetch_ohlcv_from_db and related DB functions to specify exact columns in SELECT statements. Profile queries with EXPLAIN ANALYZE to identify further optimizations.
-Impact: Decreases database load and query latency.
-
-Add Manual Refresh for Continuous Aggregates (Priority: Medium)
-Description: Implement a mechanism to manually refresh continuous aggregates (ohlcv_5min, etc.) or handle data gaps if 1m data is incomplete, ensuring higher timeframes remain accurate.
-Action: Add an admin endpoint or scheduled task to call CALL refresh_continuous_aggregate(...) for specific views. Log warnings if gaps are detected in 1m data during aggregate refreshes.
-Impact: Improves data integrity for higher timeframes.
-
-Backfill Improvements
-Parallelize Backfill Chunks (Priority: High)
-Description: Speed up historical backfills by fetching multiple chunks in parallel with a rate limiter, rather than sequentially with fixed delays.
-Action: Modify _run_historical_backfill to use asyncio.gather for parallel chunk fetches, with a semaphore to limit concurrent API calls. Integrate rate limiting logic from CryptoPlugin._with_retries.
-Impact: Reduces backfill time, improving data availability.
-
-Prioritize Real-Time Subscriptions Over Backfill (Priority: Medium)
-Description: Add a mechanism to pause or throttle backfill tasks during high server load to prioritize real-time WebSocket subscriptions.
-Action: Implement a global task manager in MarketService to monitor server load (e.g., via subscription count or CPU usage). Pause backfill tasks when load exceeds a threshold.
-Impact: Ensures low latency for real-time clients during peak usage.
-
-Testing
-Develop Unit Tests (Priority: High)
-Description: Create unit tests for core components (MarketService, SubscriptionManager, CryptoPlugin, AlpacaPlugin) to ensure reliability and catch regressions.
-Action: Use pytest and pytest-asyncio to write tests. Mock external dependencies (e.g., Redis, TimescaleDB, CCXT) using unittest.mock. Cover key methods like fetch_ohlcv, subscribe, and _with_retries.
-Impact: Increases code reliability and supports safe refactoring.
-
-Create Integration Tests (Priority: High)
-Description: Build integration tests to simulate WebSocket subscriptions and REST API calls, validating end-to-end behavior with a test database and mock plugins.
-Action: Set up a test environment using TestingConfig. Use quart test client for REST endpoints and a WebSocket test client (e.g., websocket-client) for subscriptions. Test scenarios like subscription lifecycle and error handling.
-Impact: Ensures system-level correctness and robustness.
-
-Validation and Input Handling
-Centralize Validation with Pydantic (Priority: Medium)
-Description: Reduce duplicated validation logic in market_blueprint and websocket_blueprint by using Pydantic for request/response schemas.
-Action: Define Pydantic models for API inputs (e.g., OHLCV request parameters) and outputs (e.g., Highcharts response). Integrate with Quart routes using a middleware or decorator.
-Impact: Simplifies maintenance and ensures consistent validation.
-
-Validate Plugin Parameters (Priority: Low)
-Description: Add validation for plugin_params in MarketService.fetch_ohlcv to ensure only supported parameters are passed to plugins.
-Action: Define allowed plugin_params in each MarketPlugin subclass and validate in fetch_ohlcv before calling plugin methods.
-Impact: Prevents plugin errors due to invalid parameters.
-Documentation
-
-Add Comprehensive Docstrings (Priority: Medium)
-Description: Write detailed docstrings for all public methods and complex internal ones, following a standard like Google Python Style Guide.
-Action: Update files like CryptoPlugin.py, MarketService.py, and SubscriptionManager.py to include docstrings for methods like _with_retries, fetch_ohlcv, and _poll_loop. Include parameter descriptions and return types.
-Impact: Improves code readability and developer onboarding.
-
-Create OpenAPI Specification (Priority: Medium)
-Description: Document REST endpoints and WebSocket protocol using OpenAPI and a WebSocket schema (e.g., JSON Schema for messages).
-Action: Use a library like apispec to generate an OpenAPI spec for market_blueprint, auth_blueprint, and user_blueprint. Document WebSocket message formats in a separate schema.
-Impact: Facilitates client integration and API clarity.
-
-Write High-Level Architecture Documentation (Priority: Low)
-Description: Create a high-level overview of the system architecture, including components (e.g., plugins, MarketService, SubscriptionManager) and data flow.
-Action: Add an ARCHITECTURE.md file or update README.md with diagrams (e.g., using Mermaid or PlantUML) and descriptions of key modules.
-Impact: Helps new developers understand the system quickly.
-
-Monitoring and Observability
-Add Prometheus Metrics (Priority: Medium)
-Description: Expose metrics for WebSocket connection counts, subscription rates, cache hit/miss ratios, and plugin API call latencies to improve observability.
-Action: Integrate prometheus_client with Quart. Add counters/gauges for key metrics in SubscriptionManager, Cache, and MarketService. Expose a /metrics endpoint.
-Impact: Enhances monitoring and debugging in production.
-
-Profile Database Queries (Priority: Medium)
-Description: Identify slow database queries under load to optimize performance, especially for ohlcv_data and continuous aggregates.
-Action: Use TimescaleDB's EXPLAIN ANALYZE on common queries (e.g., fetch_ohlcv_from_db). Test with a large dataset and high query volume. Optimize indexes or query patterns as needed.
-Impact: Reduces latency and database contention.
-
-Future Enhancements
-Support Real-Time Tick Data (Priority: Low)
-Description: Implement watch_ticks in plugins (e.g., CCXT's WebSocket API for crypto exchanges) to support real-time tick data for low-latency applications.
-Action: Extend MarketPlugin to handle WebSocket streams. Update SubscriptionManager to manage tick subscriptions with a separate queue or channel.
-Impact: Expands use cases for high-frequency trading or analytics.
-
-Implement Trading API (Priority: Low)
-Description: Support trading methods in MarketPlugin (e.g., place_order, fetch_balance) for providers like Alpaca to enable trading functionality.
-Action: Implement trading methods in AlpacaPlugin using Alpaca's trade API. Add authenticated endpoints in market_blueprint for order placement and balance queries.
-Impact: Broadens the application's scope to include trading.
-
-Add Rate Limiting for Plugins (Priority: Low)
-Description: Enhance CryptoPlugin._with_retries with a global rate limiter to prevent exceeding API limits across all plugin instances.
-Action: Use a library like aiolimiter to enforce rate limits per provider. Store rate limit state in Redis for multi-instance coordination.
-Impact: Prevents API bans and improves reliability.
-Miscellaneous
-
-Split Large Files (Priority: Low)
-Description: Break up large files like market_service.py and websocket_blueprint.py into smaller modules for better readability and maintainability.
-Action: Move related methods (e.g., caching logic in MarketService) to separate files (e.g., services/market_service_cache.py). Update imports accordingly.
-Impact: Improves code organization and developer experience.
-
-Handle Broad Exception Catches (Priority: Low)
-Description: Replace broad except Exception catches in CryptoPlugin._with_retries and other areas with specific exceptions (e.g., HTTP errors, rate limit errors).
-Action: Identify expected error types from CCXT and other libraries. Update exception handling to catch only those types and log unexpected errors separately.
-Impact: Improves error handling precision and debugging.
-
-User service implementation for user configuration details (Priority: low)
-Description: Implement methods to facilitate the storing and retrieval of user chart configurations, including API key information for customized chart and provider experiences.
-Action: Implement a database for this specific task to keep ohlcv and user data separate.
-Impact: Personalized user experiences and chart customization for recall per user account.
-
-Prioritization Guide
-High Priority: Tasks that significantly impact performance, scalability, or reliability (e.g., native timeframe support, testing, WebSocket scalability).
-Medium Priority: Tasks that improve efficiency, maintainability, or observability without immediate critical impact (e.g., caching optimizations, documentation).
-Low Priority: Nice-to-have enhancements or future features that expand functionality but aren't urgent (e.g., tick data, trading API).
+* **Validate Plugin Parameters**
+    * **Status**: Not Done
+    * **Description**: Add validation for `plugin_params` passed to `MarketService.fetch_ohlcv`.
+    * **Action**: Define allowed params in `MarketPlugin` subclasses; validate in `MarketService` or `DataOrchestrator`.
+    * **Impact**: Prevents plugin errors from invalid params.
+* **Create OpenAPI Specification**
+    * **Status**: Not Done
+* **Write High-Level Architecture Documentation**
+    * **Status**: Not Done
+* **Support Real-Time Tick Data**
+    * **Status**: Not Done
+* **Implement Trading API**
+    * **Status**: Not Done
+* **Add Advanced Rate Limiting for Plugins (Global/Redis-based)**
+    * **Status**: Partially Addressed (basic per-instance measures exist).
+    * **Description**: Implement a more sophisticated, shared rate limiter (e.g., using Redis) for plugin API calls.
+    * **Action**: Integrate a library like `aiolimiter` with Redis backing.
+    * **Impact**: Robust API limit handling across multiple server instances.
+* **Split Large Files (Further Refinement)**
+    * **Status**: Partially Addressed (significant refactoring already done).
+    * **Description**: Further break up larger service files if they become unwieldy.
+    * **Action**: Identify modules within large files that could be standalone.
+    * **Impact**: Code organization.
+* **User service implementation for user API keys (Full Integration)**
+    * **Status**: Partially Addressed (DB/service for general config exists).
+    * **Description**: Fully implement the storage and secure retrieval of user-specific API keys and integrate this into `MarketService._get_user_api_credentials`.
+    * **Action**: Design secure schema in `user_configs` for API keys. Implement logic in `user_service.py` and `MarketService` to use these keys when instantiating plugins.
+    * **Impact**: Enables personalized, authenticated access to data providers for users.

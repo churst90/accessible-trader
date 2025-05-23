@@ -2,7 +2,7 @@
 SECRET_KEY=-v10vmA02iA1-BTAFJUAEaB-bqvMrdlZn3IAVLc1AscChLLE_i9c5KnCymm7N_EdbjqOkZXaJaDXnNpUgEHtnQ
 
 # Database Connection String
-DB_CONNECTION_STRING=postgresql://admin:admin123@localhost/accessibletrader_db
+DB_CONNECTION_STRING=postgresql://admin:admin123@/accessibletrader_db?host=/run/postgresql
 
 # Redis URL
 REDIS_URL=redis://localhost
@@ -11,14 +11,36 @@ REDIS_URL=redis://localhost
 JWT_EXPIRATION_DELTA=3600
 
 # Trusted Origins for CORS
-TRUSTED_ORIGINS=https://accessibletrader.com
+TRUSTED_ORIGINS=https://accessibletrader.com,http://localhost:3000
 
 # Application Environment
 ENV=development
 
-# Logging Configuration (Optional)
+# Logging Configuration
 LOG_FILE=app.log
+LOG_LEVEL=DEBUG
 
-# Alpaca API keys
-ALPACA_API_KEY=PK1PBACD1I64XV25VGQY
-ALPACA_API_SECRET=EaeaczAOcx43B0qSkCil2UmrfaciU4FwRE4cAPSa
+# Backfill Configuration
+BACKFILL_API_CONCURRENCY=10
+
+# Database Insert Batch Size
+DB_INSERT_BATCH_SIZE=1000
+
+# WebSocket Subscription Limit
+MAX_WS_SUBSCRIPTIONS=10
+
+# Cache TTL for Symbols Endpoint
+CACHE_TTL_SYMBOLS=3600
+
+# Subscription Worker Poll Timeout
+POLL_FETCH_TIMEOUT_SEC=30
+
+# BACKFILL_CHUNK_DELAY_SEC: Controls delay between chunks (default 1.5s in BackfillManager)
+BACKFILL_CHUNK_DELAY_SEC=1.5
+
+# DEFAULT_BACKFILL_PERIOD_MS: Sets the default backfill period (default 30 days)
+DEFAULT_BACKFILL_PERIOD_MS=2592000000
+
+# CCXT Parameters: For CryptoPlugin
+CCXT_REQUEST_TIMEOUT_MS=30000
+CCXT_LRU_CACHE_SIZE=20
