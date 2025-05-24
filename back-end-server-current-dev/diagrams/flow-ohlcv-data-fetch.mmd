@@ -1,0 +1,78 @@
+%% Sequence Diagram: OHLCV Data Fetch Flow
+
+sequenceDiagram
+    autonumber
+    actor Client
+    participant BP as "Market Blueprint\n(/api/market/ohlcv)"
+    participant MS as "MarketService"
+    participant DO as "DataOrchestrator"
+    participant CS as "CacheSource"
+    participant AGGS as "AggregateSource"
+    participant PS as "PluginSource"
+    participant PBASE as "MarketPlugin\n(e.g., CryptoPlugin)"
+    participant REDIS as "Redis Cache"
+    participant DB as "TimescaleDB"
+    participant EXT_API as "External API\n(e.g., Exchange)"
+
+    Client->>+BP: GET /api/market/ohlcv (params: market, provider, symbol, timeframe, since, until, limit)
+    BP->>+MS: fetch_ohlcv(market, provider, symbol, timeframe, since, until, limit, user_id)
+    MS->>MS: Initializes DataOrchestrator (with self, CacheManager, DbSource, Resampler)
+    MS->>+DO: fetch_ohlcv(market, provider, symbol, timeframe, since, until, limit, user_id_for_plugin)
+    
+    %% DataOrchestrator attempts to fetch from CacheSource
+    DO->>+CS: fetch_ohlcv(timeframe, since, until, limit)
+    CS->>+REDIS: get_resampled(key) / get_1m_bars(key)
+    REDIS-->>-CS: Cached Data / Nil
+    opt Cache Miss or 1m Data Needed
+        CS->>+DB: fetch_ohlcv_from_db("1m", since, until, limit)
+        DB-->>-CS: 1m DB Data / Nil
+        opt Resampling Needed
+            CS->>CS: resampler.resample(1m_data, timeframe)
+            CS->>+REDIS: asyncio.create_task(set_resampled(key, resampled_data, ttl))
+            REDIS-->>-CS: (ack)
+        end
+    end
+    CS-->>-DO: OHLCV Bars / Empty List
+
+    %% If CacheSource didn't satisfy, and non-1m, try AggregateSource
+    alt CacheSource Miss/Insufficient for Non-1m
+        DO->>+AGGS: fetch_ohlcv(timeframe, since, until, limit)
+        AGGS->>+DB: fetch_query(aggregate_view_sql)
+        DB-->>-AGGS: Aggregate OHLCV Bars / Empty List
+        opt Aggregate Data Found & Cache Available
+            AGGS->>+REDIS: asyncio.create_task(cache_manager.set_resampled(key, agg_bars, ttl))
+            REDIS-->>-AGGS: (ack)
+        end
+        AGGS-->>-DO: OHLCV Bars / Empty List
+    end
+
+    %% If still no/insufficient data, try PluginSource
+    alt Prior Sources Miss/Insufficient
+        DO->>+MS: get_plugin_instance(market, provider, user_id)
+        MS-->>-DO: plugin_instance (MarketPlugin)
+        DO->>DO: _fetch_from_plugin_with_paging(plugin_instance, ...)
+        loop Paging Loop
+            DO->>+PBASE: fetch_historical_ohlcv(symbol, timeframe_to_fetch, chunk_since, chunk_limit, params)
+            PBASE->>+EXT_API: API Request
+            EXT_API-->>-PBASE: Raw OHLCV Data
+            PBASE-->>-DO: Chunk Bars
+            opt Timeframe_to_fetch is "1m"
+                DO->>+DB: asyncio.create_task(db_source.store_ohlcv_bars(...))
+                DB-->>-DO: (ack)
+                DO->>+REDIS: asyncio.create_task(cache_manager.store_1m_bars(...))
+                REDIS-->>-DO: (ack)
+            end
+        end
+        opt Resampling Needed from Plugin Data
+            DO->>DO: resampler.resample(raw_plugin_bars, requested_timeframe)
+            opt Cache Available
+                DO->>+REDIS: asyncio.create_task(cache_manager.set_resampled(key, resampled_bars, ttl))
+                REDIS-->>-DO: (ack)
+            end
+        end
+        DO->>DO: _apply_filters(all_bars, since, until, limit)
+        DO-->>-MS: Final Filtered OHLCV Bars
+    end
+    
+    MS-->>-BP: Final OHLCV Bars
+    BP-->>-Client: JSON Response (Highcharts format)

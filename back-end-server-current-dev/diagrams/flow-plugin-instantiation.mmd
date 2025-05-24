@@ -1,0 +1,78 @@
+%% Sequence Diagram: Plugin Instantiation and Management Flow
+
+sequenceDiagram
+    autonumber
+    participant Requester as "Requester\n(e.g., DataOrchestrator, API Blueprint)"
+    participant MS as "MarketService"
+    participant PL as "PluginLoader"
+    participant PINST_CACHE as "Plugin Instance Cache\n(MarketService._plugin_instances_cache)"
+    participant PluginClass as "Specific MarketPlugin Class\n(e.g., CryptoPlugin, AlpacaPlugin)"
+    participant PluginInstance as "MarketPlugin Instance"
+    participant UserCreds as "User Credential Service\n(MarketService._get_user_api_credentials)"
+
+    Requester->>MS: get_plugin_instance(market, provider, user_id, ...)
+    MS->>PL: get_plugin_key_for_market(market)
+    PL-->>MS: plugin_class_key
+    
+    alt plugin_class_key is found
+        MS->>MS: Proceed with plugin_class_key
+    else plugin_class_key is NOT found
+        MS->>PL: list_plugins()
+        PL-->>MS: available_plugin_keys
+        alt provider_name is one of the available_plugin_keys
+            MS->>MS: Use provider as plugin_class_key
+        else provider_name is NOT a plugin_key
+            MS-->>Requester: Error: No plugin for market/provider
+        end
+    end
+
+    MS->>PL: get_plugin_class_by_key(plugin_class_key)
+    PL-->>MS: SpecificPluginClass
+    
+    opt PluginClass not loaded (or previous alt path led to error)
+        MS-->>Requester: Error: Failed to load plugin class
+    end
+
+    MS->>PluginClass: list_configurable_providers()
+    PluginClass-->>MS: list_of_supported_provider_ids
+    opt Provider not supported by this PluginClass
+        MS-->>Requester: Error: Plugin class does not support this provider
+    end
+
+    MS->>MS: Determine API credentials & testnet_status
+    opt User ID provided and no override
+        MS->>UserCreds: _get_user_api_credentials(user_id, provider)
+        UserCreds-->>MS: api_key, api_secret, etc.
+    end
+    MS->>MS: Generate api_key_identifier
+    MS->>MS: Generate instance_cache_key
+
+    MS->>PINST_CACHE: Check for instance_cache_key
+    alt Cached instance exists
+        PINST_CACHE-->>MS: plugin_instance, last_accessed_time
+        MS->>PINST_CACHE: Update last_accessed_time for key
+        MS-->>Requester: plugin_instance
+    else Instance not in cache
+        PINST_CACHE-->>MS: Nil
+        MS->>PluginClass: new SpecificPluginClass(...)
+        PluginClass-->>PluginInstance: (constructor returns new instance)
+        PluginInstance-->>MS: new_plugin_instance
+        MS->>PINST_CACHE: Store new_plugin_instance
+        PINST_CACHE-->>MS: (ack)
+        MS-->>Requester: new_plugin_instance
+    end
+    
+    %% Separately, MarketService runs periodic cleanup
+    participant CleanupTask as "MarketService\nPeriodic Cleanup Task"
+    loop Periodically
+        CleanupTask->>CleanupTask: _run_periodic_idle_check()
+        CleanupTask->>PINST_CACHE: Iterate over cached instances
+        opt Instance idle
+            PINST_CACHE-->>CleanupTask: idle_plugin_instance_to_close, key
+            CleanupTask->>PINST_CACHE: Remove key from cache
+            PINST_CACHE-->>CleanupTask: (ack)
+            CleanupTask->>PluginInstance: idle_plugin_instance_to_close.close()
+            PluginInstance-->>CleanupTask: (ack)
+        end
+        CleanupTask->>CleanupTask: Sleep
+    end

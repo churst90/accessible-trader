@@ -1,0 +1,65 @@
+%% Sequence Diagram: WebSocket Subscription and Live Update Flow
+
+sequenceDiagram
+    autonumber
+    actor Client
+    participant WSEP as "WebSocket Endpoint\n(/api/ws/subscribe)"
+    participant SubSvc as "SubscriptionService"
+    participant SubReg as "SubscriptionRegistry"
+    participant MS as "MarketService"
+    participant SubWorker as "SubscriptionWorker"
+    participant BM as "BroadcastManager"
+    participant UserWSQueue as "Client's Send Queue\n(ws._send_queue)"
+
+    Client->>+WSEP: WebSocket Connection Request
+    WSEP-->>-Client: WebSocket Connection Established
+
+    Client->>+WSEP: Sends JSON: {type: "subscribe", market, provider, symbol, timeframe, since}
+    WSEP->>+SubSvc: subscribe(market, provider, symbol, timeframe, clientSince, user_id)
+    SubSvc->>+SubReg: register(ws, market, provider, symbol, timeframe)
+    SubReg-->>-SubSvc: (ack)
+    
+    SubSvc->>Client: via WSEP & UserWSQueue: Sends JSON: {type: "status", payload: "Subscribed. Fetching initial data..."}
+    
+    %% Initial Data Fetch (Simplified, detailed in other diagram)
+    SubSvc->>+MS: fetch_ohlcv(market, provider, symbol, timeframe, clientSince, limit, user_id)
+    MS-->>-SubSvc: Initial OHLCV Bars [cite: 3546]
+    SubSvc->>SubSvc: Transforms bars to Highcharts format
+    SubSvc->>Client: via WSEP & UserWSQueue: Sends JSON: {type: "data", payload: {ohlc, volume, initial_batch: true}}
+    
+    %% Worker Management
+    alt Worker not active or task done for key
+        SubSvc->>SubWorker: new SubscriptionWorker(registry, market_service, market, provider, symbol, timeframe, user_id)
+        SubSvc->>SubWorker: asyncio.create_task(worker.start()) [cite: 3558]
+        note right of SubWorker: Worker.start() acquires lock & begins _run() loop
+    else Worker already active
+        SubSvc->>SubSvc: Logs "Worker already active" [cite: 3558]
+    end
+    
+    %% SubscriptionWorker Polling Loop (Conceptual)
+    SubWorker->>SubWorker: _run() loop starts
+    SubWorker->>+MS: trigger_historical_backfill_if_needed(...)
+    MS-->>-SubWorker: (ack)
+    
+    loop Until worker stopped or no subscribers
+        SubWorker->>SubReg: get_subscribers(key)
+        opt No active subscribers
+            SubWorker->>SubWorker: Breaks loop & stops self
+        end
+        
+        SubWorker->>+MS: fetch_ohlcv(market, provider, symbol, timeframe, since=last_seen_ts, limit=update_limit, user_id)
+        MS-->>-SubWorker: New OHLCV Bars / Empty
+        
+        opt New bars fetched
+            SubWorker->>SubWorker: Formats bars for client
+            SubWorker->>+BM: broadcast(market, provider, symbol, timeframe, payload, subscribers)
+            BM->>UserWSQueue: Puts update message in each subscriber's queue
+            UserWSQueue-)Client: via WSEP: Receives JSON: {type: "update", ...}
+            BM-->>-SubWorker: List of dead WebSockets
+            opt Dead WebSockets found
+                SubWorker->>+SubReg: unregister(dead_ws) for each [cite: 3348]
+                SubReg-->>-SubWorker: (ack)
+            end
+        end
+        SubWorker->>SubWorker: Sleeps with jitter
+    end

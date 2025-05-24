@@ -113,7 +113,7 @@ class MarketPlugin(abc.ABC):
 
         Args:
             provider_id (str): The specific provider this instance is configured for (e.g., "binance", "alpaca").
-                               This is crucial for multi-provider plugins like CryptoPlugin.
+                                 This is crucial for multi-provider plugins like CryptoPlugin.
             api_key (Optional[str]): User's API key for authentication, if applicable.
             api_secret (Optional[str]): User's API secret for authentication, if applicable.
             api_passphrase (Optional[str]): User's API passphrase for authentication, if applicable.
@@ -154,8 +154,8 @@ class MarketPlugin(abc.ABC):
     def get_supported_markets(cls) -> List[str]:
         """Returns a list of market identifiers (e.g., 'crypto', 'stocks') this plugin CLASS supports."""
         if not isinstance(cls.supported_markets, list):
-             logger.warning(f"Plugin class {cls.__name__} 'supported_markets' is not a list. Defaulting to empty.")
-             return []
+                 logger.warning(f"Plugin class {cls.__name__} 'supported_markets' is not a list. Defaulting to empty.")
+                 return []
         return cls.supported_markets
 
     @classmethod
@@ -172,11 +172,16 @@ class MarketPlugin(abc.ABC):
     # --- Core Data Fetching Abstract Methods (to be implemented by subclasses) ---
 
     @abc.abstractmethod
-    async def get_symbols(self) -> List[str]:
+    async def get_symbols(self, market: str) -> List[str]: # MODIFIED: Added market: str
         """
-        Return a list of tradable symbols for this plugin's configured `provider_id`.
-        Example: For a Binance instance, ["BTC/USDT", "ETH/USDT", ...].
-                 For an Alpaca instance, ["AAPL", "MSFT", ...].
+        Return a list of tradable symbols for this plugin's configured `provider_id`,
+        filtered for the specified `market` (e.g., asset class like "us_equity", "crypto")
+        if the provider supports multiple asset classes via this plugin.
+
+        Args:
+            market (str): The market/asset class to filter symbols for. # NEW
+                            Plugins should interpret this to filter results if they handle
+                            multiple distinct asset classes under the same provider_id.
 
         Returns:
             List[str]: A list of symbol identifiers.
@@ -203,12 +208,12 @@ class MarketPlugin(abc.ABC):
         Args:
             symbol (str): Trading pair symbol (e.g., "BTC/USD", "AAPL").
             timeframe (str): Timeframe string (e.g., "1m", "5m", "1D").
-                             Plugins should normalize or document the expected format.
+                                 Plugins should normalize or document the expected format.
             since (Optional[int]): Start timestamp in milliseconds (inclusive, UTC).
             limit (Optional[int]): Maximum number of bars to return.
             params (Optional[Dict[str, Any]]): Extra provider-specific parameters for the API call.
-                                               This can be used for things like 'until' timestamps if the API
-                                               supports it, or other custom flags.
+                                                 This can be used for things like 'until' timestamps if the API
+                                                 supports it, or other custom flags.
 
         Returns:
             List[OHLCVBar]: A list of OHLCV bars, sorted by timestamp in ascending order.

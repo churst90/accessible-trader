@@ -108,3 +108,20 @@ export async function loadChartConfigs() {
   const data = await apiFetch(`${API_ROOT}/user/chart-configs`);
   return Array.isArray(data.configs) ? data.configs : [];
 }
+
+/** GET /api/market/markets */
+export async function loadAvailableMarkets() {
+  log('Fetching available markets...');
+  try {
+    const data = await apiFetch(`${API_ROOT}/market/markets`);
+    if (data && Array.isArray(data.markets)) {
+      log('Available markets loaded:', data.markets);
+      return data.markets;
+    }
+    errorLog('No markets array in response or data is null:', data);
+    return [];
+  } catch (err) {
+    errorLog('Failed to load available markets:', err);
+    throw err; // Re-throw for the caller to handle
+  }
+}

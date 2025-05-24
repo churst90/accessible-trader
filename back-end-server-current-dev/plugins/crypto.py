@@ -254,10 +254,10 @@ class CryptoPlugin(MarketPlugin):
                 delay = self.retry_delay_base * (2 ** attempt)
                 await asyncio.sleep(delay)
         
-        if last_exception:
-            raise PluginError(message=f"Retry loop for {method_name} exhausted. Last error: {last_exception}", provider_id=self.provider_id, original_exception=last_exception)
+        if last_exception: # Should be caught by specific error handlers raising PluginError subtypes
+             raise PluginError(message=f"Retry loop for {method_name} exhausted with unhandled error. Last error: {last_exception}", provider_id=self.provider_id, original_exception=last_exception)
+        # This line should ideally not be reached if all exceptions lead to a raise or successful return.
         raise PluginError(message=f"Exited retry loop unexpectedly for {method_name}. This indicates a logic flaw.", provider_id=self.provider_id)
-
 
 
     async def _load_and_cache_markets(self, reload: bool = False) -> Dict[str, Any]:
@@ -296,13 +296,32 @@ class CryptoPlugin(MarketPlugin):
             
     # --- MarketPlugin ABC Implementation ---
 
-    async def get_symbols(self) -> List[str]:
+    async def get_symbols(self, market: str) -> List[str]: # MODIFIED: Added market: str
         """
         Fetches the list of tradable symbols from the configured CCXT exchange instance (`self.provider_id`).
         Filters for active spot markets by default, with fallbacks.
+        The 'market' parameter is noted, but CCXT exchanges typically provide symbols
+        for their inherent market type (crypto).
         """
-        # Note: CCXT's load_markets is the source of symbols. Results are cached by _load_and_cache_markets.
-        logger.debug(f"CryptoPlugin (Instance for '{self.provider_id}'): Getting symbols.")
+        logger.debug(f"CryptoPlugin (Instance for '{self.provider_id}'): Getting symbols for market '{market}'.")
+
+        # Optional: Validate if the provided market is relevant for this crypto plugin.
+        normalized_market = market.lower()
+        plugin_supported_markets = [sm.lower() for sm in self.get_supported_markets()] # self.get_supported_markets() is from base class
+
+        if normalized_market not in plugin_supported_markets and plugin_supported_markets: # Check if plugin_supported_markets is not empty
+            logger.warning(
+                f"CryptoPlugin (Instance for '{self.provider_id}'): "
+                f"get_symbols called with market '{market}', but this plugin instance primarily supports {plugin_supported_markets}. "
+                f"Proceeding to fetch all symbols from the provider '{self.provider_id}' as CCXT plugins typically handle a single market type ('crypto')."
+            )
+        elif not plugin_supported_markets:
+             logger.warning(
+                f"CryptoPlugin (Instance for '{self.provider_id}'): "
+                f"get_symbols called, but plugin_supported_markets is empty. This is unusual. Proceeding..."
+            )
+
+
         try:
             markets_data = await self._load_and_cache_markets() # Ensures markets are loaded
             
@@ -321,16 +340,16 @@ class CryptoPlugin(MarketPlugin):
                     ]
                 if not symbols_list: # Fallback 2: All symbols if no active ones
                      logger.warning(f"CryptoPlugin (Instance for '{self.provider_id}'): No active symbols of any type. Falling back to all symbols.")
-                     symbols_list = list(markets_data.keys())
+                     symbols_list = list(markets_data.keys()) # markets_data.keys() are the symbols
             else:
                  logger.warning(f"CryptoPlugin (Instance for '{self.provider_id}'): No market data available to extract symbols.")
             
-            logger.info(f"CryptoPlugin (Instance for '{self.provider_id}'): Returning {len(symbols_list)} symbols.")
+            logger.info(f"CryptoPlugin (Instance for '{self.provider_id}'): Returning {len(symbols_list)} symbols (market context: '{market}').")
             return sorted(symbols_list)
         except PluginError: # Re-raise from _load_and_cache_markets
             raise
         except Exception as e: # Catch-all for other unexpected errors
-            logger.error(f"CryptoPlugin (Instance for '{self.provider_id}'): Unexpected error in get_symbols: {e}", exc_info=True)
+            logger.error(f"CryptoPlugin (Instance for '{self.provider_id}'): Unexpected error in get_symbols (market: {market}): {e}", exc_info=True)
             raise PluginError(message=f"Could not get symbols: {e}", provider_id=self.provider_id, original_exception=e) from e
 
     def _normalize_timeframe_for_ccxt(self, timeframe: str) -> str:
@@ -342,19 +361,13 @@ class CryptoPlugin(MarketPlugin):
         If your internal standard is already CCXT-like (e.g. "1m", "1h", "1d", "1w", "1M"),
         this function might just do minor case adjustments or pass through.
         """
-        # Assuming your internal standard might be like "1H", "1D" and CCXT prefers "1h", "1d"
-        # and "1MON" for month.
         tf_lower = timeframe.lower()
-        if tf_lower.endswith('d'): return tf_lower[:-1] + 'd' # 1D -> 1d
-        if tf_lower.endswith('h'): return tf_lower[:-1] + 'h' # 1H -> 1h
-        if tf_lower.endswith('w'): return tf_lower[:-1] + 'w' # 1W -> 1w
-        if tf_lower.endswith('mon'): return tf_lower[:-3] + 'M' # 1MON -> 1M
-        if tf_lower.endswith('y'): return tf_lower[:-1] + 'y' # 1Y -> 1y (or Y, CCXT handles)
-        # m for minute is usually fine.
-        # This is a simplified example; a more robust one would use regex like in utils.timeframes
-        # For now, if the internal standard is close to CCXT, this might suffice.
-        # CCXT itself is quite good at parsing common variations.
-        return timeframe # Pass through if no specific rule matches
+        if tf_lower.endswith('d'): return tf_lower[:-1] + 'd' 
+        if tf_lower.endswith('h'): return tf_lower[:-1] + 'h' 
+        if tf_lower.endswith('w'): return tf_lower[:-1] + 'w' 
+        if tf_lower.endswith('mon'): return tf_lower[:-3] + 'M' 
+        if tf_lower.endswith('y'): return tf_lower[:-1] + 'y' 
+        return timeframe 
 
     async def fetch_historical_ohlcv(
         self, symbol: str, timeframe: str,
@@ -363,12 +376,9 @@ class CryptoPlugin(MarketPlugin):
     ) -> List[OHLCVBar]:
         """Fetches historical OHLCV data from the configured CCXT exchange instance."""
         
-        # Convert internal standard timeframe to one CCXT typically understands
         ccxt_timeframe = self._normalize_timeframe_for_ccxt(timeframe)
         
         final_params = params.copy() if params else {}
-        # `until` is a common parameter for CCXT that might be passed in `params`
-        # Ensure `until` is also in milliseconds if present.
 
         logger.debug(
             f"CryptoPlugin (Instance for '{self.provider_id}'): Fetching OHLCV. Symbol: {symbol}, "
@@ -386,8 +396,6 @@ class CryptoPlugin(MarketPlugin):
                         logger.warning(f"CryptoPlugin ('{self.provider_id}'): Malformed bar data for {symbol} at index {i}: {bar_data}. Skipping.")
                         continue
                     
-                    # CCXT standard: [timestamp, open, high, low, close, volume]
-                    # Ensure all numeric fields are present and correctly typed.
                     ts, o, h, l, c, v = bar_data[0], bar_data[1], bar_data[2], bar_data[3], bar_data[4], bar_data[5]
                     if not all(isinstance(val, (int, float)) for val in [ts, o, h, l, c]) or \
                        not isinstance(v, (int, float, type(None))): # Volume can be None
@@ -404,25 +412,18 @@ class CryptoPlugin(MarketPlugin):
                     continue
         
         logger.info(f"CryptoPlugin (Instance for '{self.provider_id}'): Fetched {len(parsed_bars)} OHLCV bars for {symbol}/{ccxt_timeframe}.")
-        # CCXT generally returns bars sorted oldest to newest. If not, sorting here would be needed.
-        # parsed_bars.sort(key=lambda b: b['timestamp'])
         return parsed_bars
 
     async def fetch_latest_ohlcv(self, symbol: str, timeframe: str = "1m") -> Optional[OHLCVBar]:
         """
         Fetches the most recent OHLCV bar using `Workspace_historical_ohlcv` with a small limit.
-        Note: CCXT fetchOHLCV with limit=1 might not always give the absolute latest *partial* bar,
-        but rather the last *completed* bar depending on the exchange.
         """
         logger.debug(f"CryptoPlugin (Instance for '{self.provider_id}'): Fetching latest '{timeframe}' bar for {symbol}.")
         try:
-            # Fetch 2 bars and take the last one to increase chances of getting the most recent completed one.
-            # Some exchanges might return an empty list if 'since' is too recent for a full bar.
-            # Not setting 'since' to get the absolute latest bars up to `limit`.
             bars = await self.fetch_historical_ohlcv(symbol=symbol, timeframe=timeframe, limit=2, params={})
             
             if bars:
-                latest_bar = bars[-1] # The last bar in the list is the most recent.
+                latest_bar = bars[-1] 
                 logger.info(
                     f"CryptoPlugin (Instance for '{self.provider_id}'): Fetched latest '{timeframe}' bar for {symbol} "
                     f"@ {format_timestamp_to_iso(latest_bar['timestamp'])}"
@@ -486,7 +487,7 @@ class CryptoPlugin(MarketPlugin):
             
             logger.warning(f"CryptoPlugin (Instance for '{self.provider_id}'): Exchange does not list timeframes via 'exchange.timeframes' or it's empty/invalid.")
             self._supported_timeframes = [] 
-            return None
+            return None # Return None as per signature, or empty list if that's preferred contract
         except Exception as e:
             logger.error(f"CryptoPlugin (Instance for '{self.provider_id}'): Error fetching supported timeframes: {e}", exc_info=True)
             self._supported_timeframes = [] 
@@ -503,20 +504,18 @@ class CryptoPlugin(MarketPlugin):
         default_limit = 1000 # A common safe default
         try:
             exchange = await self._get_exchange()
-            limit = default_limit
-            # Standard CCXT way to get limits
+            limit = default_limit # Start with default
             if hasattr(exchange, 'limits') and isinstance(exchange.limits, dict) and \
                'OHLCV' in exchange.limits and isinstance(exchange.limits['OHLCV'], dict) and \
                'max' in exchange.limits['OHLCV'] and isinstance(exchange.limits['OHLCV']['max'], int):
                 limit = exchange.limits['OHLCV']['max']
-            # Fallback for some older CCXT versions or specific exchange structures
             elif hasattr(exchange, 'options') and isinstance(exchange.options, dict) and \
                  'fetchOHLCVLimit' in exchange.options and isinstance(exchange.options['fetchOHLCVLimit'], int):
                 limit = exchange.options['fetchOHLCVLimit']
             elif hasattr(exchange, 'fetchOHLCVLimit') and isinstance(getattr(exchange, 'fetchOHLCVLimit', None), int):
                  limit = getattr(exchange, 'fetchOHLCVLimit') # type: ignore
             
-            self._fetch_limit = max(1, limit) if limit > 0 else default_limit
+            self._fetch_limit = max(1, limit) if limit > 0 else default_limit # Ensure positive and has a floor
             logger.info(f"CryptoPlugin (Instance for '{self.provider_id}'): Determined fetchOHLCV limit: {self._fetch_limit}.")
             return self._fetch_limit
         except Exception as e:

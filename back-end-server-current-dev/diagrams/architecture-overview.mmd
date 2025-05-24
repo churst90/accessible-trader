@@ -1,0 +1,103 @@
+%% High-Level Component Diagram for OHLCV Backend
+
+graph TD
+    subgraph "API Layer (Quart)"
+        A["Blueprints: Market, Auth, User, WebSocket"]
+    end
+
+    subgraph "Core Services"
+        MS[/"MarketService\n(Manages Plugin Instances,\nOrchestrates Data/Backfill"/]
+        DO[/"DataOrchestrator\n(Fetches OHLCV via DataSources,\nResamples, Caches Results)"/]
+        SS[/"SubscriptionService\n(Manages WS Clients,\nSubscriptionWorkers"/]
+        BM[/"BackfillManager\n(Handles Historical 1m Data Gaps)"/]
+        CM[/"CacheManager (RedisCache)\n(Manages Redis Interactions)"/]
+        PL[/"PluginLoader\n(Discovers Plugin Classes)"/]
+        US[/"UserService\n(Manages User Configs)"/]
+        AS[/"AuthService\n(Handles AuthN/AuthZ)"/]
+    end
+
+    subgraph "Data Sources (Used by DataOrchestrator)"
+        CS[CacheSource]
+        AGGS[AggregateSource]
+        PS[PluginSource]
+        DBS_Write["DbSource (for Writes)"]
+    end
+
+    subgraph "Plugins (Interfaces to External Data)"
+        PBASE["MarketPlugin ABC"]
+        CP[CryptoPlugin]
+        ALP[AlpacaPlugin]
+        %% Add other plugins here
+    end
+
+    subgraph "External Systems & Storage"
+        DB[(TimescaleDB)]
+        REDIS[(Redis)]
+        EXT_CRYPTO[External Crypto Exchanges]
+        EXT_ALPACA[Alpaca API]
+    end
+
+    %% Connections
+    A --> MS
+    A --> SS
+    A --> US
+    A --> AS
+
+    MS --> PL
+    MS --> DO
+    MS --> BM
+    MS --> CM
+    MS --> PBASE
+
+    DO --> CS
+    DO --> AGGS
+    DO --> PS
+    DO --> MS
+
+    PS -.-> PBASE
+    CS --> REDIS;
+    CS --> DB
+    AGGS --> DB
+    DBS_Write --> DB
+
+    BM --> PBASE
+    BM --> DB
+    BM --> REDIS;
+
+    PBASE --> CP;
+    PBASE --> ALP;
+
+    CP -.-> EXT_CRYPTO
+    ALP -.-> EXT_ALPACA
+
+    CM --> REDIS
+    US --> DB
+    AS --> DB
+
+    SS --> MS
+    SS --> SW[SubscriptionWorker]
+    SW --> MS
+
+    %% Styles
+    style MS fill:#f9f,stroke:#333,stroke-width:2px
+    style DO fill:#f9f,stroke:#333,stroke-width:2px
+    style SS fill:#f9f,stroke:#333,stroke-width:2px
+    style BM fill:#f9f,stroke:#333,stroke-width:2px
+    style CM fill:#f9f,stroke:#333,stroke-width:2px
+    style PL fill:#f9f,stroke:#333,stroke-width:2px
+    style US fill:#f9f,stroke:#333,stroke-width:2px
+    style AS fill:#f9f,stroke:#333,stroke-width:2px
+
+    style CS fill:#ccf,stroke:#333,stroke-width:1.5px
+    style AGGS fill:#ccf,stroke:#333,stroke-width:1.5px
+    style PS fill:#ccf,stroke:#333,stroke-width:1.5px
+    style DBS_Write fill:#ccf,stroke:#333,stroke-width:1.5px
+
+    style PBASE fill:#cfc,stroke:#333,stroke-width:1.5px
+    style CP fill:#cfc,stroke:#333,stroke-width:1.5px
+    style ALP fill:#cfc,stroke:#333,stroke-width:1.5px
+
+    style DB fill:#lightgrey,stroke:#333,stroke-width:2px
+    style REDIS fill:#lightgrey,stroke:#333,stroke-width:2px
+    style EXT_CRYPTO fill:#lightgrey,stroke:#333,stroke-width:2px
+    style EXT_ALPACA fill:#lightgrey,stroke:#333,stroke-width:2px

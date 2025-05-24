@@ -37,3 +37,8 @@ ujson
 pytest
 pytest-asyncio
 pytest-mock
+
+# others
+aiohttp
+tenacity
+prometheus-client

@@ -1,10 +1,10 @@
 // assets/js/modules/uiBindings.js
 
-import { loadProviders, loadSymbols } from './dataService.js';
+import { loadProviders, loadSymbols, loadAvailableMarkets } from './dataService.js';
 import ChartController from './chartController.js';
 // initObjectTree might also need to ensure controller.chart is ready before acting
 // For now, focusing on the main toolbar
-import { initObjectTree } from './treeView.js'; 
+import { initObjectTree } from './treeView.js';
 import IndicatorPanel from './indicatorPanel.js';
 import { initDrawingPanel } from './drawingPanel.js';
 
@@ -39,8 +39,44 @@ export function initToolbar({
         return `${n}${tfDD.value}`;
     }
 
-    // --- Dropdown listeners (remain largely the same) ---
+    // --- Market Dropdown Population (NEW) ---
+    async function populateMarketDropdown() {
+        announce('Loading available markets…');
+        marketDD.innerHTML = '<option value="">Loading Markets...</option>'; // Indicate loading
+        try {
+            const markets = await loadAvailableMarkets();
+            marketDD.innerHTML = ''; // Clear loading message
+            if (markets.length === 0) {
+                marketDD.append(new Option('No markets available', ''));
+                announce('No markets available from server.');
+            } else {
+                markets.forEach(marketName => marketDD.append(new Option(marketName, marketName)));
+                if (marketDD.options.length > 0) {
+                    // TODO: Check if there's a saved market preference from localStorage or user settings
+                    // and try to select it. Otherwise, default to the first.
+                    // For now, just selecting the first one.
+                    marketDD.selectedIndex = 0;
+                    announce('Markets loaded. Loading providers for default market...');
+                    marketDD.dispatchEvent(new Event('change')); // Trigger loading providers for the first market
+                } else {
+                     announce('Markets loaded, but list is empty.');
+                }
+            }
+        } catch (err) {
+            announce(`Error loading markets: ${err.message}`);
+            console.error('[UIBindings] Error in populateMarketDropdown:', err);
+            marketDD.innerHTML = '<option value="">Error loading markets</option>';
+        }
+    }
+
+    // --- Dropdown listeners ---
     marketDD.addEventListener('change', async () => {
+        if (!marketDD.value) { // If market is empty (e.g. "Error loading markets" or "No markets available")
+            providerDD.innerHTML = '';
+            assetDD.innerHTML = '';
+            announce('Please select a valid market.');
+            return;
+        }
         announce('Loading providers…');
         providerDD.innerHTML = '<option value="">Loading...</option>'; // Indicate loading
         assetDD.innerHTML = ''; // Clear asset dropdown
@@ -49,20 +85,27 @@ export function initToolbar({
             providerDD.innerHTML = ''; // Clear loading message
             if (providers.length === 0) {
                 providerDD.append(new Option('No providers found', ''));
+                 assetDD.innerHTML = ''; // Ensure asset dropdown is also cleared
             } else {
                 providers.forEach(p => providerDD.append(new Option(p, p)));
-                if (providers.length) providerDD.value = providers[0];
+                if (providers.length) {
+                     // TODO: Check for saved provider preference for this market
+                    providerDD.value = providers[0]; // Default to first provider
+                }
             }
             providerDD.dispatchEvent(new Event('change')); // Trigger loading symbols
         } catch (err) {
             announce(`Error loading providers: ${err.message}`);
+            console.error('[UIBindings] Error in marketDD change listener (loading providers):', err);
             providerDD.innerHTML = '<option value="">Error</option>';
+            assetDD.innerHTML = '';
         }
     });
 
     providerDD.addEventListener('change', async () => {
         if (!providerDD.value) { // Handle "No providers found" or error state
             assetDD.innerHTML = '';
+            if (marketDD.value) announce('Please select a valid provider.'); // Only announce if a market is selected
             return;
         }
         announce('Loading symbols…');
@@ -74,37 +117,33 @@ export function initToolbar({
                 assetDD.append(new Option('No symbols found', ''));
             } else {
                 syms.forEach(s => assetDD.append(new Option(s, s)));
-                if (syms.length) assetDD.value = syms[0]; // Auto-select first symbol
+                if (syms.length) {
+                    // TODO: Check for saved symbol preference for this market/provider
+                    assetDD.value = syms[0]; // Auto-select first symbol
+                }
             }
+            // Optionally, trigger chart refresh here if auto-load on symbol change is desired
+            // refreshBtn.click(); 
         } catch (err) {
             announce(`Error loading symbols: ${err.message}`);
+            console.error('[UIBindings] Error in providerDD change listener (loading symbols):', err);
             assetDD.innerHTML = '<option value="">Error</option>';
         }
     });
 
-    // --- Function to wire up chart-dependent UI elements ---
-    // This will be called AFTER ChartController confirms its chart is ready.
-    // However, with the current structure, ChartController doesn't explicitly call back uiBindings.
-    // Instead, the buttons will call methods on the `controller` instance,
-    // and those methods in `ChartController` will check `if (!this.chart)`.
     function setupChartSpecificUI(currentController) {
         if (!currentController) return;
 
-        // --- Scale & Candle Toggles ---
-        // These interact with controller.renderer which should handle the chart instance check.
         switchScaleBtn.onclick = () => {
             if (!currentController.chart) { announce("Chart not ready for scale toggle."); return; }
-            usingLog = !usingLog; // This local state might get out of sync if chart is refreshed.
-                                  // Better if ChartRenderer manages its own scale state.
-            currentController.renderer.toggleScale(); // toggleScale in renderer should use its own internal state
+            currentController.renderer.toggleScale(); 
             switchScaleBtn.textContent = currentController.renderer.state.usingLog
                 ? 'Switch to Linear Scale'
                 : 'Switch to Log Scale';
-             announce(currentController.renderer.state.usingLog ? 'Log scale enabled.' : 'Linear scale enabled.');
+            announce(currentController.renderer.state.usingLog ? 'Log scale enabled.' : 'Linear scale enabled.');
         };
         switchCandleBtn.onclick = () => {
             if (!currentController.chart) { announce("Chart not ready for candle toggle."); return; }
-            // Similar to scale, renderer should manage its state.
             currentController.renderer.toggleCandle();
             switchCandleBtn.textContent = currentController.renderer.state.usingHeikin
                 ? 'Switch to Candlestick'
@@ -112,41 +151,31 @@ export function initToolbar({
             announce(currentController.renderer.state.usingHeikin ? 'Heikin Ashi candles enabled.' : 'Standard candlesticks enabled.');
         };
 
-        // --- Highcharts StockTools Proxies ---
-        // These buttons will call methods on the `currentController` instance.
-        // The controller methods themselves will check `if (!this.chart)`.
         const zoomInBtn = document.getElementById(toolbarButtons.zoomIn);
         const zoomOutBtn = document.getElementById(toolbarButtons.zoomOut);
-        // Pan button is special as it toggles Highcharts internal panning state.
-        // const panBtn = document.getElementById(toolbarButtons.pan); 
         const resetZoomBtn = document.getElementById(toolbarButtons.resetZoom);
         const toggleAnnotationsBtn = document.getElementById(toolbarButtons.toggleAnnotations);
-        // const annotateAdvancedBtn = document.getElementById(toolbarButtons.annotateAdvanced); // Handled by its own module
-        // const indicatorsBtn = document.getElementById(toolbarButtons.indicators); // Handled by its own module
         const priceIndicatorBtn = document.getElementById(toolbarButtons.priceIndicator);
         const fullScreenBtn = document.getElementById(toolbarButtons.fullScreen);
 
         if (zoomInBtn) zoomInBtn.onclick = () => {
-            announce('Zooming in...'); // Announce intent
-            currentController.zoomIn(); // This method in ChartController has the if(!this.chart) guard
+            announce('Zooming in...'); 
+            currentController.zoomIn(); 
         };
         if (zoomOutBtn) zoomOutBtn.onclick = () => {
             announce('Zooming out...');
             currentController.zoomOut();
         };
 
-        // Pan Chart - this one still needs direct chart access to toggle Highcharts' own panning
         const panBtn = document.getElementById(toolbarButtons.pan);
         if (panBtn) {
-            let isPanningEnabledByButton = false; // Local state for the button's toggle
+            let isPanningEnabledByButton = false; 
             panBtn.onclick = () => {
                 if (!currentController.chart) { announce("Chart not ready for panning."); return; }
                 isPanningEnabledByButton = !isPanningEnabledByButton;
                 currentController.chart.update({
                     chart: {
                         panning: { enabled: isPanningEnabledByButton, type: 'x' },
-                        // Optional: also control pinchType if you want touch panning tied to this button
-                        // pinchType: isPanningEnabledByButton ? 'x' : null 
                     }
                 });
                 panBtn.setAttribute('aria-pressed', isPanningEnabledByButton);
@@ -154,15 +183,14 @@ export function initToolbar({
             };
         }
 
-
         if (resetZoomBtn) resetZoomBtn.onclick = () => {
             if (!currentController.chart) { announce("Chart not ready for reset zoom."); return; }
-            currentController.chart.zoomOut(); // Highcharts own full zoom out
+            currentController.chart.zoomOut(); 
             announce('Zoom reset to full view.');
         };
 
         if (toggleAnnotationsBtn) {
-            let annotationsCurrentlyVisible = true; // Assume they start visible
+            let annotationsCurrentlyVisible = true; 
             toggleAnnotationsBtn.onclick = () => {
                 if (!currentController.chart || !currentController.chart.annotations) {
                      announce("Chart or annotations not ready."); return;
@@ -177,18 +205,13 @@ export function initToolbar({
             };
         }
         
-        // Price Indicator - This toggles a series specific option.
         if (priceIndicatorBtn) {
             let priceIndicatorCurrentlyEnabled = false;
             priceIndicatorBtn.onclick = () => {
                 if (!currentController.chart) { announce("Chart not ready for price indicator."); return; }
                 priceIndicatorCurrentlyEnabled = !priceIndicatorCurrentlyEnabled;
-                // Find the main price series (OHLC or a line series representing price)
                 const priceSeries = currentController.chart.get('ohlc') || currentController.chart.get('price-line') || currentController.chart.series[0];
-                if (priceSeries) {
-                     // Highcharts' PriceIndicator is a yAxis feature, not series.
-                     // It's typically enabled on a yAxis and links to a series.
-                     // Let's assume we want to toggle it for the main price yAxis (index 0)
+                if (priceSeries && currentController.chart.yAxis[0]) { // Check if yAxis[0] exists
                      currentController.chart.yAxis[0].update({
                         crosshair: priceIndicatorCurrentlyEnabled ? {
                             snap: true,
@@ -196,22 +219,23 @@ export function initToolbar({
                             dashStyle: 'ShortDot',
                             label: {
                                 enabled: true,
-                                format: '{value:.2f}', // Adjust format as needed
+                                format: '{value:.2f}', 
                                 backgroundColor: 'gray',
                                 padding: 5,
                                 shape: 'rect'
                             }
                         } : {
-                            snap: false, // turn off snap
+                            snap: false, 
                             label: {enabled: false}
                         }
-                     }, true); // Redraw
+                    }, true); 
+                } else {
+                    announce("Price series or Y-axis not found for indicator.");
                 }
                 priceIndicatorBtn.setAttribute('aria-pressed', priceIndicatorCurrentlyEnabled);
                 announce(priceIndicatorCurrentlyEnabled ? 'Price crosshair enabled.' : 'Price crosshair disabled.');
             };
         }
-
 
         if (fullScreenBtn) fullScreenBtn.onclick = () => {
             if (!currentController.chart) { announce("Chart not ready for full screen."); return; }
@@ -225,20 +249,13 @@ export function initToolbar({
                     .catch(err => announce(`Error exiting full screen: ${err.message}`));
             }
         };
-
-        // Initialize modal-based tools (Indicators, Advanced Annotations)
-        // These modules usually find the chart instance via getChart() or are passed it.
-        // Ensure they are robust if controller.chart is not immediately available.
-        // However, with the new flow, these should ideally be initialized
-        // *after* the chart is confirmed to be ready.
         
-        if (currentController.chart) { // Only init these if chart is definitely ready
+        if (currentController.chart) { 
             try {
-                const indicatorPanel = new IndicatorPanel(); // Assumes it uses getChart() or is passed chart
-                // If IndicatorPanel constructor needs chart, pass currentController.chart
+                const indicatorPanel = new IndicatorPanel(); 
                 const annotateAdvancedBtn = document.getElementById(toolbarButtons.annotateAdvanced);
-                if (annotateAdvancedBtn) { // This button opens the drawing panel dialog
-                     initDrawingPanel(currentController.chart); // initDrawingPanel needs the chart instance
+                if (annotateAdvancedBtn) { 
+                     initDrawingPanel(currentController.chart); 
                      annotateAdvancedBtn.onclick = () => {
                         const modal = document.getElementById('draw-dialog');
                         if (modal) modal.hidden = false;
@@ -248,9 +265,9 @@ export function initToolbar({
                 }
 
                 const indicatorsBtn = document.getElementById(toolbarButtons.indicators);
-                if (indicatorsBtn && indicatorPanel) { // This button uses the indicatorPanel instance
+                if (indicatorsBtn && indicatorPanel) { 
                     indicatorsBtn.onclick = () => {
-                        if (indicatorPanel.openBtn) indicatorPanel.openBtn.click(); // Trigger internal open logic
+                        if (indicatorPanel.openBtn) indicatorPanel.openBtn.click(); 
                         else announce("Indicators panel not available.");
                         announce('Indicators dialog opened');
                     };
@@ -266,11 +283,10 @@ export function initToolbar({
     }
 
 
-    // --- Refresh Chart Button ---
     refreshBtn.addEventListener('click', () => {
         announce('Refreshing chart...');
         if (controller) {
-            controller.destroy(); // Use the new destroy method in ChartController
+            controller.destroy(); 
             controller = null;
         }
 
@@ -286,54 +302,76 @@ export function initToolbar({
             return;
         }
 
+        // Ensure container is empty or Highcharts will error on re-init to same element
+        if (container) container.innerHTML = ''; 
+
+
         controller = new ChartController(container, announceEl, params);
         
-        // The `init` method now starts the WebSocket connection.
-        // UI elements dependent on the chart being fully rendered will be
-        // (or should be) handled once the ChartController confirms readiness,
-        // or their click handlers should delegate to controller methods that check for chart readiness.
         controller.init()
-            .then(() => {
-                // init now resolves very quickly after starting WS.
-                // The actual chart object isn't available in `controller.chart` immediately here.
-                // So, we should call setupChartSpecificUI *after* the chart is known to be rendered.
-                // For now, let's assume ChartController methods handle the chart==null case.
-                // We can call setupChartSpecificUI here, and its internal button handlers
-                // will rely on the ChartController's methods having safety checks.
-                // Or, ChartController could take `setupChartSpecificUI` as a callback for when its chart is ready.
-                
-                // Let's bind the buttons that call controller's own methods (which have guards)
-                setupChartSpecificUI(controller); 
+            .then((chartInstance) => { // init() resolves with the chart instance or null
+                if (chartInstance) { // Check if chart was successfully created
+                    setupChartSpecificUI(controller); 
+                } else {
+                    announce('Chart failed to initialize after refresh.');
+                }
             })
             .catch(err => {
-                console.error('Chart initialization process failed:', err);
+                console.error('Chart initialization process failed on refresh:', err);
                 announce(`Chart load failed: ${err.message}`);
             });
     });
 
-    // Initial setup for saved configs (if any)
     try {
-        initObjectTree(savedConfig => {
+        initObjectTree(async savedConfig => { // Make this callback async
             announce('Loading saved chart configuration...');
             if (controller) {
                 controller.destroy();
+                controller = null;
             }
+            
             // Update dropdowns to reflect saved config before creating controller
+            // This needs to be done sequentially.
             marketDD.value = savedConfig.market;
-            // You'll need to async load providers and symbols then set providerDD and assetDD, then create controller
-            // This part needs careful async handling to set dropdowns correctly before init.
-            // For now, let's assume savedConfig has all necessary details.
-            // A more robust way would be to trigger 'change' on marketDD, wait, then providerDD, wait etc.
+            await populateMarketDropdown(); // This will set marketDD and trigger provider load
+
+            // Wait for providers to load and then set the provider
+            // This is a bit tricky as 'change' events are async.
+            // A more robust way is to make loadProviders/Symbols return data and manually set.
+            
+            // Simple approach: Assume populateMarketDropdown will trigger provider loading,
+            // then we manually set provider and symbol from savedConfig IF THEY EXIST in the loaded options.
+            // This is still not perfectly robust without more state management or chained promises.
+
+            // A better way:
+            // 1. Set marketDD.value
+            // 2. Call loadProviders(savedConfig.market)
+            // 3. Populate providerDD, set providerDD.value = savedConfig.provider
+            // 4. Call loadSymbols(savedConfig.market, savedConfig.provider)
+            // 5. Populate assetDD, set assetDD.value = savedConfig.symbol
+            // Then init controller.
+
+            // For now, let's assume the saved config is valid and will eventually be selected
+            // by the triggered change events, then we make a new controller.
+            // This part is complex to get right without a small state machine or careful promise chaining.
+
+            // Simplified: set the values and hope the event chain catches up.
+            // A more robust solution would involve awaiting each step of dropdown population.
+            if (Array.from(providerDD.options).some(opt => opt.value === savedConfig.provider)) {
+                providerDD.value = savedConfig.provider;
+            }
+            if (Array.from(assetDD.options).some(opt => opt.value === savedConfig.symbol)) {
+                assetDD.value = savedConfig.symbol;
+            }
+            // Potentially parse savedConfig.timeframe for multInput and tfDD
+            // e.g. "5m" -> multInput.value = 5, tfDD.value = "m"
 
             controller = new ChartController(container, announceEl, savedConfig);
             controller.init()
-                .then(() => {
-                    setupChartSpecificUI(controller);
-                     // Update UI dropdowns based on savedConfig AFTER chart controller setup
-                     if(marketDD.value !== savedConfig.market) marketDD.value = savedConfig.market;
-                     // Simulating change events to reload provider/symbol lists based on saved config
-                     // This might be complex due to async nature.
-                     // A better way is to make loadProviders/Symbols return promises and chain them.
+                .then((chartInstance) => {
+                    if (chartInstance) {
+                        setupChartSpecificUI(controller);
+                    }
                 })
                 .catch(err => {
                     console.error('Saved chart load failed:', err);
@@ -344,12 +382,7 @@ export function initToolbar({
         console.warn("Object tree/saved configs not initialized or failed:", e);
     }
 
-    // Initial population of dropdowns (kick things off)
-    if (marketDD.options.length > 0) {
-         if(!marketDD.value) marketDD.selectedIndex = 0; // Ensure something is selected if list populated
-         marketDD.dispatchEvent(new Event('change'));
-    } else {
-        // Handle case where market dropdown might be initially empty
-        announce("Market data not available for selection.");
-    }
-}
+    // Initial population of market dropdown
+    populateMarketDropdown(); 
+
+} // End of initToolbar

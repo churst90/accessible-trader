@@ -1,0 +1,52 @@
+%% Flowchart: Historical Data Backfill Process
+
+graph TD
+    A[/"Backfill Triggered\n(e.g., by MarketService)"/] --> B{"Task Already Running for Asset?"}
+    B -- Yes --> C["Skip New Trigger / Log"]
+    B -- No --> D["Acquire Asset-Specific Lock (_backfill_locks)"]
+    D --> E{"Lock Acquired?"}
+    E -- No (Lock Held by Other) --> C
+    E -- Yes --> F["Double-Check Task Status (after acquiring lock)"]
+    F -- Task Now Running --> C
+    F -- No Active Task --> G["Create _run_historical_backfill Task"]
+    
+    subgraph "BackfillManager: _run_historical_backfill Task"
+        H[/"Determine Overall Target Oldest Timestamp\n(e.g., now - default_backfill_period_ms)"/]
+        H --> I["Call find_missing_1m_ranges(target_oldest_ms, now_ms)"]
+        I --> J{"Missing Ranges Found?"}
+        J -- No --> K["Log No Gaps"]
+        J -- Yes --> L["Sort Gaps (e.g., newest first)"]
+        L --> M{"Iterate Through Gaps"}
+        M -- Next Gap --> N["Process Current Gap (start_ms, end_ms)"]
+        N --> O{"Chunk Loop: current_end > gap_start AND total_chunks < max_chunks?"}
+        O -- Yes --> P[/"Calculate Chunk\n(chunk_fetch_since, actual_limit_for_plugin)"/]
+        P --> Q["_api_semaphore: Acquire"]
+        Q --> R["Call _process_backfill_chunk (Simplified Label)"]
+        R --> S{"Bars Fetched from Plugin?"}
+        S -- Yes --> T["Filter for New, Relevant Older Bars"]
+        T --> U{"Relevant Bars Found?"}
+        U -- Yes --> V["Schedule Async DB Insert (DbSource/insert_ohlcv_to_db)"]
+        V --> W["Schedule Async Cache Store (CacheManager.store_1m_bars)"]
+        W --> X["Update current_end_of_chunk_ms to earliest fetched bar's timestamp"]
+        X --> Y["Increment Counters (chunks, bars)"]
+        Y --> Z["Wait (backfill_chunk_delay_sec)"]
+        Z --> O
+        U -- No --> O
+        S -- No (Plugin Returned No Data) --> BB["Break Chunk Loop for Current Gap"]
+        R -- Error/Retry Exceeded --> BB
+        BB --> M
+        O -- No (Loop Condition False) --> M
+        M -- All Gaps Processed or Max Chunks for Run Reached --> AA["Log Backfill Run Summary"]
+        AA --> K
+    end
+    
+    G --> H
+    Z_END["Lock Released"]
+    K --> Z_END
+
+    %% Styling
+    style A fill:#lightblue,stroke:#333,stroke-width:2px
+    style G fill:#lightgreen,stroke:#333,stroke-width:2px
+    style R fill:#lightyellow,stroke:#333,stroke-width:2px
+    style K fill:#lightcoral,stroke:#333,stroke-width:2px
+    style Z_END fill:#lightcoral,stroke:#333,stroke-width:2px

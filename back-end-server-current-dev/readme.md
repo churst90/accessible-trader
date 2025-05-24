@@ -1,260 +1,193 @@
-Accessible Trader Back-End
-
-A high-performance, asynchronous back-end server built with Quart for streaming and historical market data via REST and WebSocket APIs. Designed to support live charting for both stocks and cryptocurrencies, with caching, TimescaleDB continuous aggregates, plugin-based data sources, and robust connection management.
-
-Table of Contents
-
-Features
-
-Architecture
-
-Getting Started
-
-Prerequisites
-
-Installation
-
-Configuration
-
-Running the Server
-
-API Endpoints
-
-REST
-
-WebSocket
-
-Data Layer
-
-TimescaleDB & Continuous Aggregates
-
-Redis Caching
-
-Plugin System
-
-Scalability & Performance
-
-Areas for Improvement
-
-License
-
-Features
-
-Async I/O everywhere: Quart + asyncpg + aioredis for non-blocking DB & cache operations.
-
-Historical & live data: REST endpoint for OHLCV, Highcharts-ready responses; WebSocket for live updates.
-
-Subscription de-duplication: Single poll per (market, provider, symbol, timeframe) regardless of number of clients.
-
-Caching layers:
-
-Hourly bucketed Redis cache for raw 1m bars.
-
-TimescaleDB continuous aggregates (5m, 15m, 1h, 1d, etc.).
-
-Final OHLCV & latest-bar caches with configurable TTL.
-
-Plugin-based data sources: Alpaca (stocks) and CCXT (crypto) plugins implement a consistent interface. More plugins are coming soon.
-
-JWT auth & user config: Secure login, token refresh, per-user settings storage.
-
-Graceful startup/shutdown: Lifecycle hooks register DB, Redis, plugin discovery, SubscriptionManager, and clean up on exit.
-
-Heartbeat & timeouts: Detect silent or closed WebSocket clients; ping/pong keeps connections alive.
-
-Architecture
-
-+-----------+    HTTP/REST    +--------+      DB       +-------------+
-|  Frontend | <--------------> | Quart  | <----------> | TimescaleDB |
-| (React)   |                  | Server |              +-------------+
-+-----------+        WS        |        |               Redis Cache
-      ^                      / |        | <----------> +-------------+
-      |  WebSocket (API)    /  +--------+               | Redis       |
-      |                   /                           +-------------+
-      +------------------+
-
-Client communicates via REST for historical data and WebSocket for live updates.
-
-Quart routes requests to blueprints (market, auth, user, websocket).
-
-MarketService orchestrates caching, continuous aggregates, and plugin fetch logic.
-
-SubscriptionManager deduplicates polls and broadcasts new bars to subscribed clients.
-
-PluginLoader dynamically discovers and instantiates data plugins (Alpaca, CCXT), others.
-
-Storage:
-
-TimescaleDB hypertable for raw 1m OHLCV.
-
-Continuous aggregates for coarser timeframes.
-
-Redis for caching grouped bars and final responses.
-
-Getting Started
-
-Prerequisites
-
-Python 3.10+
-
-PostgreSQL with TimescaleDB extension
-
-Redis
-
-Environment variables (see Configuration)
-
-Installation
-
-git clone https://github.com/churst90/accessible-trader.git
-cd accessible-trader
-python -m venv venv
-source venv/bin/activate
-pip install -r requirements.txt
-
-Configuration
-
-Create a .env at project root or set environment variables:
-
-# Core
-SECRET_KEY=your_secret_key
-DB_CONNECTION_STRING=postgresql://user:pass@localhost:5432/accessibletrader_db
-REDIS_URL=redis://localhost:6379/0
-
-# JWT
-JWT_EXPIRATION_DELTA=3600
-
-# Plugin credentials (Alpaca example)
-ALPACA_API_KEY=your_alpaca_key
-ALPACA_API_SECRET=your_alpaca_secret
-
-# CORS origins
-TRUSTED_ORIGINS=http://localhost:3000
-
-Also adjust optional caching/pool sizes in config.py as needed.
-
-Running the Server
-
-# Initialize TimescaleDB (see ohlcv-db-setup.sql)
-psql -f ohlcv-db-setup.sql
-
-# Start Quart via Hypercorn
-./start-server.sh
-
-API Endpoints
-
-REST
-
-Method
-
-Path
-
-Description
-
-GET
-
-/api/market/providers?market={m}
-
-List available providers for a market
-
-GET
-
-/api/market/symbols?market={m}&provider={p}
-
-List symbols for provider
-
-GET
-
-/api/market/ohlcv?market={m}&provider={p}&symbol={s}&timeframe={tf}&since={ms}&before={ms}&limit={n}
-
-Fetch historical OHLCV data (Highcharts)
-
-POST
-
-/api/auth/login
-
-Username/password ? JWT token
-
-POST
-
-/api/auth/refresh
-
-Refresh JWT token
-
-POST
-
-/api/user/save_config
-
-Save per-user config (requires JWT)
-
-GET
-
-/api/user/get_user_data
-
-Get user config (requires JWT)
-
-WebSocket
-
-URL: ws://{host}/api/ws/subscribe?market={m}&provider={p}&symbols=SYM1,SYM2&timeframe={tf}&since={ms}
-
-Handshake: On connect, you receive an initial historical batch.
-
-Live updates: New bars are pushed as individual data messages.
-
-Heartbeat: Server pings every 15s; client should respond with pong or any message.
-
-Data Layer
-
-TimescaleDB & Continuous Aggregates
-
-Raw table ohlcv_data stores 1m bars.
-
-Continuous aggregate views for 5m,15m,30m,1h,4h,1d,1w,1mon,1y auto-refresh on schedule.
-
-Query via Materialized Views when timeframe ? 1m, with fallback to resampling raw data.
-
-Redis Caching
-
-Hourly buckets: Groups of 1m bars keyed 1m_bars_hr:{market}:{provider}:{symbol}:{hourly_ts}.
-
-Final result cache: Highcharts-formatted responses keyed by query params.
-
-Latest bar TTL: Dynamic short-lived cache for real-time polling.
-
-Plugin System
-
-Plugins implement MarketPlugin interface.
-
-AlpacaPlugin for stocks via Alpaca API.
-
-CryptoPlugin for crypto via CCXT.
-
-Discovered at startup; factories manage credentials and LRU instances.
-
-Scalability & Performance
-
-Async architecture: Avoids blocking threads.
-
-Subscription de-duplication: One poll per unique key regardless of client count.
-
-Connection pools: Configurable asyncpg & aioredis pools.
-
-Horizontal scaling caveat: In-process state (subscriptions, WS registry) is not shared—requires external pub/sub for multi-instance.
-
-Resource tuning: Pool sizes, cache TTLs, and poll intervals can be tuned in config.py.
-
-Areas for Improvement
-
-Horizontal scaling: Move subscription registry to Redis Pub/Sub or NATS.
-
-Metrics & monitoring: Integrate Prometheus/Grafana to surface latency, queue depth, error rates.
-
-Back-pressure: Limit per-client buffer sizes; graceful slowdown if clients fall behind.
-
-Security hardening: Rate limiting, input sanitization, stricter CORS, HTTPS enforcement.
-
-Stress testing: Load test with 100+ unique symbols to calibrate connection pools and CPU usage.
-
-License
-
-MIT © Your Name
-
+# OHLCV Data Server API
+
+## Description
+
+This project is a Python-based server API designed to collect, store, and serve Open, High, Low, Close, and Volume (OHLCV) data for various financial markets. It features a modular plugin system to support different data providers (e.g., cryptocurrency exchanges via CCXT, stock markets via Alpaca) and leverages a PostgreSQL database with TimescaleDB for efficient time-series data management. The API is built using the Quart web framework and includes functionalities for data fetching, caching, real-time updates via WebSockets, and user authentication.
+
+## Features
+
+* **Modular Plugin System**: Easily extendable to support new data providers and markets.
+    * Currently supports cryptocurrency exchanges through CCXT (`CryptoPlugin`).
+    * Supports stock markets through Alpaca (`AlpacaPlugin`).
+* **Time-series Database**: Utilizes PostgreSQL with TimescaleDB for storing and querying OHLCV data efficiently.
+* **Continuous Aggregation**: Pre-aggregates 1-minute OHLCV data into various timeframes (5min, 15min, 30min, 1h, 4h, 1d, 1w, 1mon, 1y) for faster querying.
+* **RESTful API**: Provides endpoints to:
+    * List available markets and providers.
+    * Fetch symbols for a given market/provider.
+    * Fetch historical and latest OHLCV data with various parameters (timeframe, since, until, limit).
+    * User authentication (login, refresh token).
+    * User configuration saving and retrieval.
+* **WebSocket Subscriptions**: Allows clients to subscribe to real-time OHLCV updates for specific assets.
+* **Data Orchestration**: Manages data fetching from multiple sources (cache, aggregates, live plugins) with pagination and resampling capabilities.
+* **Caching**:
+    * Caches market data (symbols, etc.) at the plugin instance level.
+    * Uses Redis for caching 1-minute OHLCV data and resampled data to reduce database load and improve response times.
+* **Backfill Management**: System to find and fill gaps in historical 1-minute data from plugins.
+* **Configuration Management**: Flexible configuration setup for different environments (development, production, testing).
+* **Error Handling**: Standardized error responses across the API.
+* **Authentication Middleware**: JWT-based authentication for protecting user-specific endpoints.
+
+## Technologies Used
+
+* **Backend**: Python
+* **Web Framework**: Quart
+* **Database**: PostgreSQL with TimescaleDB extension
+* **Caching**: Redis (via `aioredis`)
+* **Cryptocurrency Data**: CCXT library
+* **Stock Data**: Alpaca API (via `aiohttp`)
+* **Asynchronous Programming**: `asyncio`
+
+## Project Structure Overview
+
+The project is organized into several key directories and modules:
+
+* **`app.py`**: Main application entry point, creates and configures the Quart app, initializes services and blueprints.
+* **`config.py`**: Handles application configuration for different environments (Development, Production, Testing).
+* **`plugins/`**: Contains the plugin system for market data integration.
+    * `base.py`: Defines the abstract `MarketPlugin` class and custom plugin exceptions.
+    * `crypto.py`: Implements `CryptoPlugin` using CCXT for fetching cryptocurrency data.
+    * `alpaca.py`: Implements `AlpacaPlugin` using Alpaca API for fetching stock data.
+    * `__init__.py` (PluginLoader): Dynamically discovers and manages `MarketPlugin` classes.
+* **`services/`**: Contains various services that encapsulate business logic.
+    * `market_service.py`: Manages plugin instances, API key configurations, and orchestrates data fetching.
+    * `data_orchestrator.py`: Core component for fetching OHLCV data from various sources (cache, aggregates, plugins), handles resampling and caching strategies.
+    * `data_sources/`: Defines different data source types.
+        * `base.py`: Abstract `DataSource` class.
+        * `cache_source.py`: Fetches data from Redis cache with database fallback, handles resampling and caching of resampled data.
+        * `db_source.py`: Interacts with the primary OHLCV database for reads and writes.
+        * `aggregate_source.py`: Fetches data from TimescaleDB continuous aggregate views.
+        * `plugin_source.py`: Adapts `MarketPlugin` instances to the `DataSource` interface.
+    * `cache_manager.py`: (Assumed, based on `RedisCache` and `CacheABC`) Abstract interface and Redis implementation for caching.
+    * `redis_cache.py`: (Assumed, likely contains `RedisCache` implementation)
+    * `resampler.py`: Handles resampling of OHLCV data to different timeframes.
+    * `subscription_service.py`: Manages WebSocket client subscriptions and dispatches data updates via workers.
+    * `subscription_worker.py`: Periodically polls for new data for a specific subscription and broadcasts updates.
+    * `subscription_registry.py`: Keeps track of active WebSocket subscriptions.
+    * `subscription_lock.py`: Ensures only one worker polls for a unique subscription key.
+    * `broadcast_manager.py`: Handles broadcasting messages to subscribed WebSocket clients.
+    * `auth_service.py`: Handles user authentication and JWT generation/refresh.
+    * `user_service.py`: Manages user-specific data like configurations.
+    * `backfill_manager.py`: Manages the process of fetching and storing missing historical 1-minute data.
+* **`blueprints/`**: Quart blueprints for organizing routes.
+    * `market.py`: API endpoints for market data (providers, symbols, OHLCV).
+    * `auth.py`: API endpoints for user authentication (`/login`, `/refresh`).
+    * `user.py`: API endpoints for user-specific operations (`/save_config`, `/get_user_data`).
+    * `websocket.py`: WebSocket endpoint (`/subscribe`) for real-time data.
+* **`middleware/`**: Custom middleware for the Quart application.
+    * `auth_middleware.py`: JWT-based authentication and role enforcement.
+    * `error_handler.py`: Global error handlers for common HTTP errors.
+* **`utils/`**: Utility functions and classes.
+    * `db_utils.py`: Helper functions for database interactions (fetch, execute, data insertion/retrieval for OHLCV).
+    * `timeframes.py`: Utilities for parsing and handling timeframe strings and timestamps.
+    * `response.py`: Standardized API response formatting.
+    * `validation.py`: Request data validation helpers.
+* **`app_extensions/`**: Handles initialization of app extensions like database pool, Redis, logging, and other services at startup.
+    * `__init__.py`: Orchestrates the initialization of various extensions.
+    * `logging_config.py`: Configures application-wide logging.
+    * `db_pool.py`: Initializes and manages the `asyncpg` database connection pool.
+    * `redis_manager.py`: Initializes and manages the Redis client and `RedisCache` service.
+    * `plugin_loader_init.py`: (Assumed) Initializes the `PluginLoader`.
+    * `subscription_service_init.py`: (Assumed) Initializes the `SubscriptionService`.
+
+## Database Schema
+
+The primary database schema revolves around storing OHLCV data and managing pre-aggregated views for performance.
+
+* **`ohlcv_data` Table**:
+    * Stores raw OHLCV data, typically at 1-minute resolution.
+    * Columns: `market` (text), `provider` (text), `symbol` (text), `timeframe` (text), `timestamp` (timestamptz), `base_currency` (text, nullable), `quote_currency` (text, nullable), `open` (float8), `high` (float8), `low` (float8), `close` (float8), `volume` (float8), `source` (text, default 'api').
+    * Primary Key: `(market, provider, symbol, timeframe, timestamp)`.
+    * This table is a TimescaleDB hypertable, partitioned by `timestamp`.
+
+* **Continuous Aggregates / Materialized Views**:
+    * The system uses TimescaleDB continuous aggregates to create materialized views for various timeframes (e.g., `ohlcv_5min`, `ohlcv_15min`, `ohlcv_30min`, `ohlcv_1h`, `ohlcv_4h`, `ohlcv_1d`, `ohlcv_1w`, `ohlcv_1mon`, `ohlcv_1y`).
+    * These views are derived from the 1-minute data in `ohlcv_data`.
+    * They typically include: `market`, `provider`, `symbol`, `timeframe` (target timeframe), `bucketed_time` (start of the aggregate period), `open` (first open in bucket), `high` (max high), `low` (min low), `close` (last close), `volume` (sum of volume).
+
+* **`preaggregation_configs` Table**:
+    * Stores metadata about the pre-aggregated views.
+    * Columns: `config_id` (serial, pk), `view_name` (text, unique), `target_timeframe` (text, unique), `base_timeframe` (text), `bucket_interval` (text), `is_active` (boolean), `description` (text).
+    * This table is used by `AggregateSource` to dynamically find and query the correct materialized view.
+
+* **Indexes and Triggers**:
+    * Various indexes are created on the hypertable chunks and materialized views for query optimization, primarily on `bucketed_time` and combinations of `market`, `provider`, `symbol`, and `bucketed_time`.
+    * Triggers (`ts_cagg_invalidation_trigger`) are used for continuous aggregate invalidation when base data in `ohlcv_data` changes.
+
+## API Endpoints
+
+### Market Data (`/api/market`)
+
+* **GET `/providers`**: Get a list of available data providers for a given market.
+    * Query Parameters: `market` (string, required)
+* **GET `/symbols`**: Get a list of tradable symbols for a given market and provider.
+    * Query Parameters: `market` (string, required), `provider` (string, required)
+* **GET `/ohlcv`**: Fetch OHLCV data for a given symbol.
+    * Query Parameters:
+        * `market` (string, required)
+        * `provider` (string, required)
+        * `symbol` (string, required)
+        * `timeframe` (string, default: "1m")
+        * `since` (integer, optional, millisecond timestamp)
+        * `until` (integer, optional, millisecond timestamp, also accepts `before`)
+        * `limit` (integer, optional, default configured by `DEFAULT_CHART_POINTS`)
+
+### Authentication (`/api/auth`)
+
+* **POST `/login`**: Authenticate a user.
+    * Request Body: `{"username": "...", "password": "..."}`
+    * Response: `{"token": "jwt_token"}`
+* **POST `/refresh`**: Refresh an existing JWT.
+    * Request Body: `{"token": "existing_jwt_token"}`
+    * Response: `{"token": "new_jwt_token"}`
+
+### User (`/api/user`) - Requires JWT Authentication
+
+* **POST `/save_config`**: Save user-specific configuration.
+    * Request Body: JSON object with user configuration data.
+* **GET `/get_user_data`**: Retrieve user-specific data.
+
+### WebSocket (`/api/ws`)
+
+* **`/subscribe`**: Endpoint for WebSocket connections.
+    * Client sends JSON messages:
+        * `{"type":"subscribe", "market": "...", "provider": "...", "symbol": "...", "timeframe": "...", "since": ... (optional)}`
+        * `{"type":"unsubscribe"}`
+    * Server sends data updates and pings.
+
+## Setup and Installation (General Guidance)
+
+1.  **Environment Setup**:
+    * Set up a Python virtual environment.
+    * Install dependencies from `requirements.txt` (not provided, but typical).
+2.  **Database Setup**:
+    * Install PostgreSQL.
+    * Install the TimescaleDB extension for PostgreSQL.
+    * Create a database and user.
+    * Apply the schema (from `1.txt` or an equivalent migration script). Specifically, create the `ohlcv_data` hypertable and `preaggregation_configs` table.
+    * Configure continuous aggregate policies as defined by the views in `1.txt`.
+3.  **Redis Setup**:
+    * Install and run a Redis server if caching is desired.
+4.  **Configuration**:
+    * Set environment variables as defined in `config.py` (e.g., `ENV`, `DB_CONNECTION_STRING`, `REDIS_URL`, `SECRET_KEY`, API keys for providers).
+5.  **Running the Application**:
+    * Use a command like `quart run` or an ASGI server like Hypercorn.
+
+## How to Run (General Guidance)
+
+```bash
+# 1. Set environment variables (example)
+export ENV="development"
+export DB_CONNECTION_STRING="postgresql://user:password@host:port/database"
+export REDIS_URL="redis://localhost:6379/0"
+export SECRET_KEY="your_very_secret_key"
+export ALPACA_API_KEY="your_alpaca_key"
+export ALPACA_API_SECRET="your_alpaca_secret"
+# ... other provider API keys as needed
+
+# 2. (If not done) Install dependencies
+# pip install -r requirements.txt
+
+# 3. (If not done) Initialize database schema and TimescaleDB extension
+
+# 4. Run the Quart application
+quart run --host 0.0.0.0 --port 5000
