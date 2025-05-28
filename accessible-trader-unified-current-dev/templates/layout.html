@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="light"> {# Default theme, JS will override from localStorage #}
+<head>
+    <meta charset="UTF-8">
+    <title>{{ title | default("Accessible Trader") }}</title> {# Page specific title #}
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <link rel="stylesheet" href="{{ url_for('static', filename='assets/css/base.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='assets/css/light-theme.css') }}">
+    <link rel="stylesheet" href="{{ url_for('static', filename='assets/css/dark-theme.css') }}">
+
+    {# Highcharts CSS for stocktools (if used and not bundled elsewhere) #}
+    <link rel="stylesheet" href="https://code.highcharts.com/css/stocktools/gui.css">
+
+
+    {# Block for page-specific head content #}
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+    <a href="#main" class="visually-hidden focusable">Skip to main content</a>
+    <header role="banner">
+        <div class="site-header">
+            <h1><a href="{{ url_for('frontend.serve_home_page') }}" style="color: var(--text-color)">Accessible Trader</a></h1>
+            <nav role="navigation" aria-label="Main Navigation">
+                <ul>
+                    <li><a href="{{ url_for('frontend.serve_home_page') }}">Home</a></li>
+                    <li><a href="{{ url_for('frontend.serve_chart_page') }}">Chart</a></li>
+                    {# Placeholder for auth-dependent links - JS will manage visibility/href #}
+                    <li class="auth-dependent" style="display:none;"><a href="#" id="profile-link">Profile</a></li>
+                    <li class="auth-dependent" style="display:none;"><a href="#" id="credentials-link">API Keys</a></li>
+                    <li class="auth-dependent" style="display:none;"><a href="#" id="bots-link">Trading Bots</a></li>
+                    <li class="auth-dependent" style="display:none;"><a href="#" id="logout-link">Logout</a></li>
+                    <li class="no-auth-dependent"><a href="{{ url_for('frontend.serve_register_page') }}" id="register-link">Register</a></li>
+                    <li class="no-auth-dependent"><a href="{{ url_for('frontend.serve_login_page') }}" id="login-link">Login</a></li>
+                    <li><a href="{{ url_for('frontend.serve_faq_page') }}">FAQ</a></li>
+                    <li><a href="{{ url_for('frontend.serve_support_page') }}">Support</a></li>
+                </ul>
+            </nav>
+            <button
+                type="button" {# Explicitly type button #}
+                id="theme-toggle"
+                aria-label="Toggle light/dark mode"
+                aria-pressed="false"
+                style="margin-left:auto; padding:0.5rem; border:1px solid var(--border-color); background:var(--background-color); color:var(--text-color); border-radius:4px;">
+                Toggle Theme
+            </button>
+        </div>
+    </header>
+
+    <main id="main" role="main" class="site-main" tabindex="-1"> {# Add tabindex for skip link target #}
+        {% block content %}{% endblock %} {# Page specific content goes here #}
+    </main>
+
+    <footer role="contentinfo">
+        <p>&copy; <span id="current-year"></span> Accessible Trader. Empowering traders with disabilities worldwide.</p>
+    </footer>
+
+    <script>
+        document.getElementById('current-year').textContent = new Date().getFullYear();
+    </script>
+    {# Global JS bundle for theme toggle and future global JS #}
+    <script src="{{ url_for('static', filename='assets/js/app.bundle.js') }}" defer></script>
+
+    {# Block for page-specific scripts at the end of body #}
+    {% block body_scripts %}{% endblock %}
+</body>
+</html>

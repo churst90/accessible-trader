@@ -1,0 +1,27 @@
+{% extends "layout.html" %}
+
+{% block title %}Login - Accessible Trader{% endblock %}
+
+{% block content %}
+<section id="login-section" aria-labelledby="login-heading">
+    <h1 id="login-heading">Login</h1>
+    <p role="alert" id="login-error-message" class="error-message" style="color: red; display: none;"></p>
+    <form id="login-form" aria-describedby="login-error-message">
+        <div>
+            <label for="username">Username</label>
+            <input type="text" id="username" name="username" required autocomplete="username">
+        </div>
+        <div>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" required autocomplete="current-password">
+        </div>
+        <button type="submit">Log In</button>
+    </form>
+    <p>Don't have an account? <a href="{{ url_for('frontend.serve_register_page') }}">Register here</a>.</p>
+</section>
+{% endblock %}
+
+{% block body_scripts %}
+    {{ super() }}
+    ## <script type="module" src="{{ url_for('static', filename='assets/js/auth_ui.js') }}"></script> #}
+{% endblock %}

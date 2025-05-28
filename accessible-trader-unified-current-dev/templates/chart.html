@@ -1,0 +1,352 @@
+{% extends "layout.html" %}
+
+{% block title %}Live Chart - Accessible Trader{% endblock %}
+
+{% block head_extra %}
+    <style>
+        /* Dialog overlay and content - Copied from chart.php and adapted */
+        .dialog-content {
+            background: var(--card-bg);
+            padding: 1rem;
+            border-radius: 4px;
+            max-width: 500px; /* Slightly wider for more complex dialogs */
+            width: 90%;
+            margin: auto;
+            color: var(--text-color);
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+        }
+        #indicator-modal, /* Combined styles for all modals */
+        #draw-dialog,
+        #sonification-dialog,
+        #indicator-settings-modal {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.6); /* Darker overlay */
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 10000;
+        }
+        [hidden] { display: none !important; }
+
+        .param-row { margin-bottom: 0.75rem; }
+        .param-row label { display: block; margin-bottom: 0.25rem; font-weight: bold; }
+        .param-row input[type="number"],
+        .param-row input[type="text"],
+        .param-row input[type="datetime-local"],
+        .param-row input[type="color"],
+        .param-row select {
+            width: 100%;
+            padding: 0.4rem;
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            background-color: var(--background-color);
+            color: var(--text-color);
+        }
+
+        .dialog-buttons { text-align: right; margin-top: 1.5rem; display: flex; justify-content: flex-end; gap: 0.5rem;}
+        /* .dialog-buttons button { margin-left: 0.5rem; } */ /* Using gap now */
+
+        /* Specific for drawing tools list */
+        #draw-tool-list { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-bottom: 1rem; }
+        #draw-tool-list button { /* Was li[role="option"] */
+            padding: 0.5rem 0.8rem;
+            cursor: pointer;
+            border: 1px solid var(--border-color);
+            background-color: var(--background-color);
+            color: var(--text-color);
+            border-radius: 3px;
+            flex-grow: 1; /* Allow buttons to grow */
+        }
+        #draw-tool-list button[aria-pressed="true"] {
+            background: var(--accent-color);
+            color: var(--background-color); /* Ensure contrast */
+            font-weight: bold;
+        }
+
+        /* Style for active indicators/annotations list */
+        #active-indicators, #active-annotations {
+            list-style-type: none;
+            padding-left: 0;
+            max-height: 150px; /* Limit height and make scrollable */
+            overflow-y: auto;
+            border: 1px solid var(--border-color);
+            padding: 0.5rem;
+            border-radius: 3px;
+            margin-top: 0.5rem;
+        }
+        #active-indicators li, #active-annotations li {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+            padding: 0.5rem; /* Increased padding */
+            border: 1px solid var(--border-color);
+            border-radius: 3px;
+            background-color: var(--background-color); /* Ensure bg for theme */
+        }
+        #active-indicators li button, #active-annotations li button {
+            padding: 0.2rem 0.5rem;
+            font-size: 0.85em;
+            cursor: pointer;
+        }
+        #active-indicators h3, #draw-dialog h3 { margin-top: 1rem; }
+
+        /* Tab-like buttons for indicator categories */
+        div[role="tablist"] {
+            display: flex;
+            gap: 0.3rem;
+            margin-bottom: 1rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+        div[role="tablist"] button[role="tab"] {
+            padding: 0.5rem 1rem;
+            border: 1px solid transparent;
+            border-bottom: none;
+            background-color: transparent;
+            color: var(--text-color);
+            cursor: pointer;
+            border-top-left-radius: 3px;
+            border-top-right-radius: 3px;
+        }
+        div[role="tablist"] button[role="tab"][aria-selected="true"] {
+            background-color: var(--background-color); /* Match card bg for active tab */
+            border-color: var(--border-color);
+            border-bottom-color: var(--background-color); /* Hide bottom border of active tab */
+            position: relative;
+            top: 1px; /* To make it overlap the main border */
+            font-weight: bold;
+        }
+        div[role="tabpanel"] {
+            padding: 0.5rem;
+            border: 1px solid var(--border-color);
+            border-top: none; /* Tab provides top border */
+            border-radius: 0 0 3px 3px;
+        }
+    </style>
+{% endblock %}
+
+{% block content %}
+    <section id="toolbar" role="toolbar" aria-label="Chart controls" class="toolbar">
+        <label for="marketDropdown">Market:</label>
+        <select id="marketDropdown" aria-label="Select Market"></select>
+
+        <label for="providerDropdown">Provider:</label>
+        <select id="providerDropdown" aria-label="Select Provider"></select>
+
+        <label for="assetPairDropdown">Symbol/Ticker:</label>
+        <select id="assetPairDropdown" aria-label="Select Symbol or Ticker"></select>
+
+        <label for="multiplierInput">Timeframe Multiplier:</label>
+        <input type="number" id="multiplierInput" value="1" min="1" step="1" aria-label="Timeframe Multiplier">
+
+        <label for="timeframeDropdown">Timeframe Unit:</label>
+        <select id="timeframeDropdown" aria-label="Select Timeframe Unit">
+            <option value="m">Minute</option>
+            <option value="h">Hour</option>
+            <option value="d">Day</option>
+        </select>
+
+        <button type="button" id="switch-scale-btn" aria-pressed="false">Switch to Log Scale</button>
+        <button type="button" id="switch-candle-btn" aria-pressed="false">Switch to Heikin Ashi</button>
+
+        <button type="button" id="stockTools-btn-zoom-in" aria-label="Zoom In">Zoom In</button>
+        <button type="button" id="stockTools-btn-zoom-out" aria-label="Zoom Out">Zoom Out</button>
+        <button type="button" id="stockTools-btn-pan" aria-label="Toggle Chart Panning" aria-pressed="false">Pan Chart</button>
+        <button type="button" id="stockTools-btn-reset-zoom" aria-label="Reset Zoom">Reset Zoom</button>
+        <button type="button" id="stockTools-btn-toggle-annotations" aria-label="Toggle Annotations" aria-pressed="true">Toggle Annotations</button>
+        <button type="button" id="stockTools-btn-annotations-advanced" aria-label="Open Drawing Tools Dialog">Annotations ... </button>
+        <button type="button" id="stockTools-btn-indicators" aria-label="Open Indicators Dialog">Indicators ... </button>
+        <button type="button" id="stockTools-btn-price-indicator" aria-label="Toggle Price Crosshair" aria-pressed="false">Price Indicator</button>
+        <button type="button" id="stockTools-btn-full-screen" aria-label="Toggle Full Screen">Full Screen</button>
+
+        <button type="button" id="refresh-chart">Refresh Chart</button>
+    </section>
+
+    <section
+        id="container"
+        role="region"
+        aria-label="Price and volume chart"
+        style="height:60vh; width:100%; max-width:1200px; margin:1rem auto;"
+    ></section>
+
+    <div aria-live="polite" class="visually-hidden" id="chartStatus"></div>
+    <div aria-live="assertive" class="visually-hidden" id="chartErrorStatus"></div>
+
+    <div id="indicator-modal" role="dialog" aria-modal="true" aria-labelledby="indicator-dialog-title" hidden>
+        <div class="dialog-content">
+            <h2 id="indicator-dialog-title" tabindex="-1">Indicators</h2>
+            <div role="tablist" aria-label="Indicator categories">
+                <button type="button" role="tab" id="tab-overlays" aria-selected="true">Overlays</button>
+                <button type="button" role="tab" id="tab-osc" aria-selected="false">Oscillators</button>
+                <button type="button" role="tab" id="tab-vol" aria-selected="false">Volume</button>
+            </div>
+            <div role="tabpanel" id="panel-overlays" aria-labelledby="tab-overlays" tabindex="0"></div>
+            <div role="tabpanel" id="panel-osc" aria-labelledby="tab-osc" tabindex="0" hidden></div>
+            <div role="tabpanel" id="panel-vol" aria-labelledby="tab-vol" tabindex="0" hidden></div>
+
+            <div id="indicator-params"></div>
+            <div class="dialog-buttons">
+                <button id="indicator-add" type="button" disabled>Add Indicator</button>
+                <button id="indicator-close" type="button">Close Indicators</button>
+            </div>
+            <h3>Active Indicators</h3>
+            <ul id="active-indicators" aria-label="List of active indicators"></ul>
+        </div>
+    </div>
+
+    <div id="draw-dialog" role="dialog" aria-modal="true" aria-labelledby="draw-dialog-title" hidden>
+        <div class="dialog-content">
+            <h2 id="draw-dialog-title" tabindex="-1">Drawing Tools</h2>
+            <div id="draw-tool-list" role="grid" aria-label="Choose a drawing tool"></div>
+            <div id="draw-params"></div>
+            <div class="dialog-buttons">
+                <button id="draw-cancel" type="button">Cancel Drawing</button>
+                <button id="draw-place"  type="button" disabled>Place Drawing</button>
+            </div>
+            <h3>Active Annotations</h3>
+            <ul id="active-annotations" aria-label="List of active annotations"></ul>
+        </div>
+    </div>
+
+    <div id="sonification-dialog" role="dialog" aria-modal="true" aria-labelledby="sonifyDialogTitle" hidden>
+        <div class="dialog-content">
+            <h2 id="sonifyDialogTitle" tabindex="-1">Sonification Settings</h2>
+            <form id="sonifyForm">
+                <div class="param-row">
+                    <label for="sonification-duration">Duration (ms):</label>
+                    <input type="number" id="sonification-duration" value="8000" min="100" step="100">
+                </div>
+                <div class="param-row">
+                    <label for="sonification-instrument">Instrument:</label>
+                    <select id="sonification-instrument">
+                        <option value="sine">Sine</option>
+                        <option value="triangle">Triangle</option>
+                        <option value="square">Square</option>
+                        <option value="sawtooth">Sawtooth</option>
+                    </select>
+                </div>
+                <div class="param-row">
+                    <label>
+                        <input type="checkbox" id="sonification-grouping" checked>
+                        Group Data Points
+                    </label>
+                </div>
+                <div class="dialog-buttons">
+                    <button type="submit">Play Sonification</button>
+                    <button type="button" id="sonifyCancel">Cancel Sonification</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <div id="indicator-settings-modal" role="dialog" aria-modal="true" aria-labelledby="indicator-settings-title" hidden>
+        <div class="dialog-content">
+            <h2 id="indicator-settings-title" tabindex="-1">Edit Indicator Settings</h2>
+            <div id="indicator-settings-params"></div>
+            <h3>Visual Settings</h3>
+            <div id="indicator-settings-visual"></div>
+            <h3>Sonification Settings</h3>
+            <div id="indicator-settings-sonify"></div>
+            <div class="dialog-buttons">
+                <button id="indicator-settings-cancel" type="button">Cancel Edit</button>
+                <button id="indicator-settings-save" type="button">Save Settings</button>
+            </div>
+        </div>
+    </div>
+
+    <section id="object-tree" role="tree" aria-label="Saved chart configurations" style="margin-top: 1rem; padding: 0.5rem; border: 1px solid var(--border-color);"></section>
+
+    <section id="trading-dashboard-container" aria-labelledby="trading-dashboard-heading" style="display:none;">
+        <h2 id="trading-dashboard-heading">Trading Dashboard</h2>
+        <div id="credential-selector-area" style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border-color);">
+             <label for="active-api-credential" style="margin-right: 0.5rem;">Active API Credential:</label>
+             <select id="active-api-credential" aria-label="Select API Credential for Trading"><option value="">None Selected</option></select>
+             <button id="manage-credentials-btn" type="button" style="margin-left: 1rem;">Manage API Keys</button>
+        </div>
+        
+        <div id="trading-panel-content" style="display:none;"> {# Hidden until a credential is selected #}
+            {# Tabs for Trade, Bots, Order Book etc. will go here #}
+            <p>Select an API credential to enable trading features.</p>
+            <div id="manual-trade-panel">
+                <h3>Manual Trade</h3>
+                <form id="trade-form">
+                    <div class="param-row">
+                        <label for="trade-symbol">Symbol:</label>
+                        <input type="text" id="trade-symbol" name="symbol" readonly> {# Populated from chart #}
+                    </div>
+                    <div class="param-row">
+                        <label for="trade-side">Side:</label>
+                        <select id="trade-side" name="side">
+                            <option value="buy">Buy</option>
+                            <option value="sell">Sell</option>
+                        </select>
+                    </div>
+                    <div class="param-row">
+                        <label for="trade-type">Order Type:</label>
+                        <select id="trade-type" name="order_type">
+                            <option value="market">Market</option>
+                            <option value="limit">Limit</option>
+                        </select>
+                    </div>
+                    <div class="param-row">
+                        <label for="trade-amount">Amount:</label>
+                        <input type="number" id="trade-amount" name="amount" step="any" required>
+                    </div>
+                    <div class="param-row" id="trade-price-row" style="display:none;">
+                        <label for="trade-price">Price (for Limit):</label>
+                        <input type="number" id="trade-price" name="price" step="any">
+                    </div>
+                    <button type="submit" id="place-order-btn">Place Order</button>
+                </form>
+                <div id="trade-instrument-details" style="font-size:0.9em; margin-top:0.5em; color: var(--text-secondary-color);"></div>
+            </div>
+            <div id="order-book-panel" style="margin-top:1rem;">
+                <h3>Order Book</h3>
+                <div id="order-book-display" style="display:flex; gap: 1rem;">
+                    <div id="bids-display" style="width:50%;"><h4>Bids</h4><ul></ul></div>
+                    <div id="asks-display" style="width:50%;"><h4>Asks</h4><ul></ul></div>
+                </div>
+            </div>
+             <div id="live-trades-panel" style="margin-top:1rem;">
+                <h3>Recent Trades</h3>
+                <ul id="live-trades-list" style="max-height: 200px; overflow-y: auto;"></ul>
+            </div>
+            <div id="open-orders-panel" style="margin-top:1rem;">
+                <h3>Open Orders</h3>
+                <button id="refresh-open-orders-btn" type="button">Refresh Open Orders</button>
+                <ul id="open-orders-list"></ul>
+            </div>
+            <div id="positions-panel" style="margin-top:1rem;">
+                <h3>Positions</h3>
+                <button id="refresh-positions-btn" type="button">Refresh Positions</button>
+                <ul id="positions-list"></ul>
+            </div>
+            <div id="balances-panel" style="margin-top:1rem;">
+                <h3>Account Balances</h3>
+                <button id="refresh-balances-btn" type="button">Refresh Balances</button>
+                <ul id="balances-list"></ul>
+            </div>
+        </div>
+    </section>
+{% endblock %}
+
+{% block body_scripts %}
+    {# Highcharts and its modules #}
+    <script src="https://code.highcharts.com/stock/highstock.js"></script>
+    <script src="https://code.highcharts.com/stock/indicators/indicators-all.js"></script>
+    <script src="https://code.highcharts.com/modules/drag-panes.js"></script>
+    <script src="https://code.highcharts.com/modules/annotations-advanced.js"></script>
+    <script src="https://code.highcharts.com/modules/price-indicator.js"></script>
+    <script src="https://code.highcharts.com/modules/full-screen.js"></script>
+    <script src="https://code.highcharts.com/stock/modules/stock-tools.js"></script>
+    <script src="https://code.highcharts.com/modules/accessibility.js"></script>
+    <script src="https://code.highcharts.com/modules/sonification.js"></script>
+    <script src="https://code.highcharts.com/modules/exporting.js"></script>
+    <script src="https://code.highcharts.com/modules/export-data.js"></script>
+    <script src="https://code.highcharts.com/modules/offline-exporting.js"></script>
+
+    {# Your chart-specific JS bundle #}
+    <script type="module" src="{{ url_for('static', filename='assets/js/chart.bundle.js') }}"></script>
+{% endblock %}

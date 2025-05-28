@@ -1,0 +1,59 @@
+# .env variables and settings
+# To use, copy this file from env to .env
+
+# Quart configuration and settings
+# Quart Secret Key
+SECRET_KEY=<secret key here>
+# Trusted Origins for CORS
+TRUSTED_ORIGINS=https://example.com,http://localhost:3000
+# Redis URL
+REDIS_URL=redis://localhost
+# Application Environment
+ENV=development
+# Logging Configuration
+LOG_FILE=app.log
+LOG_LEVEL=DEBUG
+# JWT Token Expiration Time in seconds
+JWT_EXPIRATION_DELTA=3600
+
+# Database configuration
+# OHLCV Database Connection String
+OHLCV_DB_CONNECTION_STRING=postgresql://your_username:your_password@/ohlcv_db?host=/run/postgresql
+# User Trading Configurations Database (user_configs_db - MariaDB/MySQL)
+USER_CONFIGS_DB_CONNECTION_STRING=mysql+asyncmy://your_username:your_password@localhost/user_configs_db
+# User Authentication Database (userdb - MariaDB/MySQL)
+AUTH_DB_CONNECTION_STRING=mysql+asyncmy://your_username:your_password@localhost/users_db
+# Database Insert Batch Size
+DB_INSERT_BATCH_SIZE=1000
+
+# Backfill Configuration
+BACKFILL_API_CONCURRENCY=10
+# BACKFILL_CHUNK_DELAY_SEC: Controls delay between chunks (default 1.5s in BackfillManager)
+BACKFILL_CHUNK_DELAY_SEC=1.5
+# Backfill gap chunk size
+APP_MAX_BACKFILL_CHUNKS_PER_RUN=100
+# DEFAULT_BACKFILL_PERIOD_MS: Sets the default backfill period (default 30 days)
+DEFAULT_BACKFILL_PERIOD_MS=2592000000
+
+# Websocket configuration
+# WebSocket Subscription Limit
+MAX_WS_SUBSCRIPTIONS=10
+
+# Misc config
+# Cache TTL for Symbols Endpoint
+CACHE_TTL_SYMBOLS=3600
+# Subscription Worker Poll Timeout
+POLL_FETCH_TIMEOUT_SEC=30
+
+# CCXT Parameters: For CryptoPlugin
+CCXT_REQUEST_TIMEOUT_MS=30000
+CCXT_LRU_CACHE_SIZE=20
+
+# Cryptography fernet key
+ENCRYPTION_KEY_FERNET=zidYJpAoOwojsushQlNSj59_63drMfENKoR03NcBdtI=
+
+# Plugin polling configuration
+POLLING_INTERVAL_ORDER_BOOK_SEC=2
+POLLING_INTERVAL_TRADES_SEC=5
+POLLING_INTERVAL_OHLCV_SEC=60
+POLLING_INTERVAL_USER_ORDERS_SEC=15

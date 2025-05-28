@@ -1,0 +1,143 @@
+# -----------------------------------------------------------------------------
+# APPLICATION CORE SETTINGS
+# -----------------------------------------------------------------------------
+# Environment: "development", "production", or "testing"
+# Determines debug mode, logging levels, and other environment-specific behaviors.
+ENV=development
+
+# Secret Key: A long, random string used for session signing, CSRF protection, etc.
+# Generate a strong key, e.g., using: openssl rand -hex 32
+SECRET_KEY=your_very_strong_and_random_secret_key_here
+
+# -----------------------------------------------------------------------------
+# DATABASE SETTINGS
+# -----------------------------------------------------------------------------
+# Primary OHLCV Database (TimescaleDB / PostgreSQL)
+# Example: postgresql://username:password@hostname:port/database_name
+DB_CONNECTION_STRING=postgresql://admin:admin123@localhost:5432/ohlcv_data_db
+
+# User Configurations Database (MySQL / MariaDB)
+# Used for storing user-specific API keys (encrypted), chart layouts, etc.
+# Example: mysql+aiomysql://username:password@hostname:port/user_configs_db
+USER_CONFIGS_DB_CONNECTION_STRING=mysql+aiomysql://user_config_admin:securepass123@localhost:3306/user_configs_db
+
+# -----------------------------------------------------------------------------
+# REDIS SETTINGS
+# -----------------------------------------------------------------------------
+# Redis URL for caching and Pub/Sub
+# Example: redis://hostname:port/db_number
+REDIS_URL=redis://localhost:6379/0
+
+# -----------------------------------------------------------------------------
+# AUTHENTICATION (JWT)
+# -----------------------------------------------------------------------------
+# JWT Token Expiration Time in seconds (e.g., 3600 = 1 hour, 86400 = 24 hours)
+JWT_EXPIRATION_DELTA=3600
+
+# -----------------------------------------------------------------------------
+# CORS (Cross-Origin Resource Sharing)
+# -----------------------------------------------------------------------------
+# Comma-separated list of trusted origins. No trailing slashes.
+# For development, you might include http://localhost:3000 (frontend dev server)
+# For production, your actual frontend domain(s).
+# Example: TRUSTED_ORIGINS=https://yourdomain.com,http://localhost:3000
+TRUSTED_ORIGINS=http://localhost:3000,https://accessibletrader.com
+
+# -----------------------------------------------------------------------------
+# LOGGING
+# -----------------------------------------------------------------------------
+# Log Level: DEBUG, INFO, WARNING, ERROR, CRITICAL
+LOG_LEVEL=DEBUG
+
+# Optional Log File Path: If empty, logs to stdout/stderr (recommended for containers).
+# If set, ensure the application has write permissions to this file/directory.
+# Example: LOG_FILE=/var/log/app/ohlcv_server.log
+LOG_FILE=
+
+# -----------------------------------------------------------------------------
+# MARKET DATA & PLUGIN BEHAVIOR
+# -----------------------------------------------------------------------------
+# Default number of bars to fetch in a single plugin request if not specified.
+DEFAULT_PLUGIN_CHUNK_SIZE=500
+
+# Default number of data points to return for chart API calls if 'limit' is not provided.
+DEFAULT_CHART_POINTS=200
+
+# --- CCXT Specific Parameters (for CryptoPlugin) ---
+# Request timeout for CCXT library calls in milliseconds.
+CCXT_REQUEST_TIMEOUT_MS=30000
+
+# Size of the LRU cache used by CCXT for market data, etc. (0 to disable)
+CCXT_LRU_CACHE_SIZE=20
+
+# -----------------------------------------------------------------------------
+# BACKFILL MANAGER
+# -----------------------------------------------------------------------------
+# Maximum number of concurrent API calls the backfill manager will make to a data provider.
+BACKFILL_API_CONCURRENCY=5
+
+# Delay in seconds between fetching consecutive chunks for a single asset during backfill.
+BACKFILL_CHUNK_DELAY_SEC=1.5
+
+# Default historical period in milliseconds the backfill manager attempts to fill.
+# Example: 2592000000 (30 days), 7776000000 (90 days), 31536000000 (1 year)
+# The application might have a larger internal maximum if this is not set.
+DEFAULT_BACKFILL_PERIOD_MS=2592000000
+
+# Maximum number of chunks the backfill manager will fetch for a single data gap in one run.
+# Prevents a single backfill task for one asset from running indefinitely.
+MAX_PLUGIN_CHUNKS_PER_GAP=100
+
+# -----------------------------------------------------------------------------
+# DATABASE OPERATIONS
+# -----------------------------------------------------------------------------
+# Number of OHLCV bars to batch together for a single database insert operation.
+DB_INSERT_BATCH_SIZE=1000
+
+# -----------------------------------------------------------------------------
+# REAL-TIME SUBSCRIPTIONS (WebSocket)
+# -----------------------------------------------------------------------------
+# Maximum number of concurrent WebSocket subscriptions allowed per client.
+MAX_WS_SUBSCRIPTIONS=10
+
+# Timeout in seconds for the subscription worker when polling for new data.
+POLL_FETCH_TIMEOUT_SEC=30
+
+# -----------------------------------------------------------------------------
+# CACHING (Time-To-Live - TTLs in seconds)
+# -----------------------------------------------------------------------------
+# TTL for cached lists of symbols from market data providers.
+CACHE_TTL_API_SYMBOLS_SECONDS=3600
+
+# TTL for cached 1-minute OHLCV bar data (if using time-bucketed caching, this might be per bucket).
+CACHE_TTL_1M_BAR_GROUP_SECONDS=86400 # 24 hours
+
+# TTL for cached resampled OHLCV results (e.g., 5m, 1H bars).
+CACHE_TTL_RESAMPLED_OHLCV_SECONDS=300 # 5 minutes
+
+# Base TTL for the "latest bar" cache key. The MarketService might adjust this.
+CACHE_TTL_LATEST_BAR_BASE_SECONDS=10
+
+# Default number of 1-minute bars to fetch from DB/cache when needed for resampling,
+# if no other context provides a limit.
+DEFAULT_1M_FETCH_LIMIT_FOR_RESAMPLING=1000
+
+# -----------------------------------------------------------------------------
+# PLACEHOLDERS FOR POTENTIAL FUTURE PROVIDER CREDENTIALS (FOR THE APP ITSELF)
+# These are NOT for user-specific API keys, which go into the user_configs_db.
+# Only uncomment and use if the *application itself* needs its own API key for a service
+# that is not tied to a specific user (e.g., a general market news API).
+# -----------------------------------------------------------------------------
+# EXAMPLE_GLOBAL_API_KEY=
+# EXAMPLE_GLOBAL_SERVICE_URL=
+
+# -----------------------------------------------------------------------------
+# DEVELOPMENT/TESTING SPECIFIC (Optional Overrides)
+# These are typically not set in production .env files but can be useful
+# for overriding specific settings during local development or testing.
+# Your config.py might look for these specific variables for test environments.
+# -----------------------------------------------------------------------------
+# TEST_DB_CONNECTION_STRING=postgresql://test_user:test_pass@localhost:5432/ohlcv_test_db
+# TEST_USER_CONFIGS_DB_CONNECTION_STRING=mysql+aiomysql://test_config_user:test_pass@localhost:3306/user_configs_test_db
+# TEST_REDIS_URL=redis://localhost:6379/1
+# TEST_JWT_EXPIRATION_DELTA=60
